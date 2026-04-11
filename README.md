@@ -14,8 +14,8 @@ An AI agents project built with LangGraph, ChromaDB, and the Anthropic API, targ
 
 ```bash
 # 1. Clone and set up environment
-git clone https://github.com/rahu2727/appmentor.git
-cd appmentor
+git clone https://github.com/rahu2727/AppMentor.git
+cd AppMentor
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -37,7 +37,7 @@ python week2/query_test.py
 ## Project Structure
 
 ```
-appmenter/
+appMentor/
 ├── .env.example          ← copy to .env and fill in your keys
 ├── requirements.txt      ← all Python dependencies
 ├── week1/                ← ReAct agent (Anthropic SDK + Tavily)
