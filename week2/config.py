@@ -27,10 +27,12 @@ CONFIG: dict = {
             "stock",
             "setting-up",
         ],
+        "max_pages_per_section": 15,
     },
 
-    # ── ERPNext source-code crawler (Week 3+) ────────────────────────────────
+    # ── ERPNext source-code crawler ───────────────────────────────────────────
     "code": {
+        "clone_dir": "./week2/data/erpnext_repo",
         "target_modules": [
             "erpnext/hr",
             "erpnext/accounts",
