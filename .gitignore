@@ -1,14 +1,21 @@
 # Secrets
 .env
 
-# ChromaDB persistent storage
-chroma_db/
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
 
-# ERPNext source repo (large)
-data/erpnext_repo/
+# ChromaDB persistent storage
+week2/chroma_db/
+
+# Downloaded data (ERPNext repo + docs clone)
+week2/data/
 
 # Python
 __pycache__/
+*.pyc
 *.py[cod]
 *.pyo
 *.pyd
@@ -17,24 +24,10 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-eggs/
-parts/
-var/
-sdist/
-develop-eggs/
-.installed.cfg
-lib/
-lib64/
-wheels/
 
-# Virtual environments
-venv/
-.venv/
-env/
-.env/
-
-# Node
-node_modules/
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
@@ -42,9 +35,8 @@ node_modules/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
+# Node
+node_modules/
 
 # Jupyter
 .ipynb_checkpoints/

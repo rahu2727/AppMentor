@@ -1,64 +1,84 @@
 # AppMentor
+### AI knowledge assistant for enterprise applications
 
-An AI agents project built with LangGraph, ChromaDB, and the Anthropic API, targeting ERPNext as the demo application.
+> Ask AppMentor anything about your codebase.
+> Get a different answer depending on who you are.
 
-## Sprint Overview
+![Sprint 1 — ERPNext Knowledge Base](screenshot.png)
 
-| Week | Days | Focus |
-|------|------|-------|
-| Week 1 | Days 1–5 | ReAct agent with Anthropic tool use + Tavily search |
-| Week 2 | Days 6–9 | ERPNext knowledge base with ChromaDB |
-| Weeks 3–6 | Days 10+ | LangGraph orchestration, MCP server, Streamlit UI, demo polish |
+## What it does
+AppMentor reads your enterprise codebase and documentation,
+stores it in a local vector database, and answers questions
+in plain English — differently for each role:
+- End User gets step-by-step guidance
+- Business User gets process and policy detail  
+- Manager gets high-level overview
+- Developer gets technical detail and code references
 
-## Quick Start
+## What is built so far
+- Sprint 1 (complete): ReAct agent + ChromaDB knowledge base
+- Sprint 2 (next): LangGraph 4-agent pipeline + 5 personas
+- Sprint 3: Streamlit chat UI
+- Sprint 4: MCP tool servers
+- Sprint 5: Microsoft Teams + browser extension
 
-```bash
-# 1. Clone and set up environment
+## Quick start (under 30 minutes)
+
+### Prerequisites
+- Python 3.11 or higher
+- Git
+- An Anthropic API key (console.anthropic.com)
+- A Tavily API key (app.tavily.com — free)
+
+### 1. Clone and set up
+```
 git clone https://github.com/rahu2727/AppMentor.git
 cd AppMentor
 python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+venv\Scripts\activate
 pip install -r requirements.txt
+```
 
-# 2. Configure secrets
+### 2. Add your API keys
+```
 cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY and TAVILY_API_KEY
+# Open .env and replace placeholder values with your real keys
+```
 
-# 3. Run the Week 1 ReAct agent
-python week1/agent.py
-# or ask a direct question:
-python week1/agent.py "What is an ERPNext Item Group?"
-
-# 4. Ingest the Week 2 knowledge base and test it
+### 3. Build the knowledge base
+```
 python week2/ingest.py --source forum
-python week2/query_test.py
+python week2/ingest.py --source docs
+python week2/ingest.py --source code
 ```
 
-## Project Structure
+Note: First run downloads embedding model (~90MB, once only)
+Code ingestion clones ERPNext repo (~400MB, once only)
 
+### 4. Run AppMentor
 ```
-appMentor/
-├── .env.example          ← copy to .env and fill in your keys
-├── requirements.txt      ← all Python dependencies
-├── week1/                ← ReAct agent (Anthropic SDK + Tavily)
-│   ├── agent.py
-│   └── tools.py
-├── week2/                ← ERPNext knowledge base (ChromaDB)
-│   ├── ingest.py
-│   ├── query_test.py
-│   ├── config.py
-│   ├── store/
-│   │   └── chroma_store.py
-│   └── sources/
-│       └── forum_ingester.py
-├── week3/                ← LangGraph multi-agent orchestration (coming soon)
-├── week4/                ← MCP server integration (coming soon)
-├── week5/                ← Streamlit UI (coming soon)
-└── week6/                ← Demo polish and deployment (coming soon)
+streamlit run app.py
+# Opens at http://localhost:8501
 ```
 
-## Prerequisites
+## Try these questions
+- "How do I submit an expense claim?"
+- "What happens if my leave approver is on leave?"
+- "What is the difference between a Purchase Order and a Material Request?"
 
-- Python 3.10+
-- [Anthropic API key](https://console.anthropic.com/)
-- [Tavily API key](https://tavily.com/) (free tier available)
+## Security
+- Your .env file is excluded by .gitignore
+- Your API keys never leave your machine during ingestion
+- ChromaDB runs locally — your data stays on your system
+- Only the final answer generation calls the Anthropic API
+
+## Tech stack
+- Python · Anthropic Claude · LangGraph · ChromaDB
+- Sentence Transformers · Streamlit · Tavily Search
+- Open source · MIT License
+
+## Built by
+Rahul Chaudhary
+SAP ABAP and Fiori developer — first AI project
+Building in public, one sprint at a time.
+github.com/rahu2727/AppMentor
