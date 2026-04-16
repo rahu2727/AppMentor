@@ -2,8 +2,9 @@
 week1/agent.py — ReAct agent using the Anthropic Python SDK.
 
 Usage:
-    python week1/agent.py                          # interactive REPL
-    python week1/agent.py "What is ERPNext?"       # single question via CLI
+    python week1/agent.py                                # interactive REPL
+    python week1/agent.py "What is ERPNext?"             # single question
+    python week1/agent.py                                # press Enter to run TEST_QUESTIONS
 
 The agent follows the ReAct loop:
     Thought → Action (tool call) → Observation → ... → Final Answer
@@ -19,7 +20,7 @@ from pathlib import Path
 import anthropic
 from dotenv import load_dotenv
 
-# Add project root to path so sibling imports work from any cwd
+# Allow running from any working directory
 sys.path.insert(0, str(Path(__file__).parent))
 from tools import TOOL_MAP, TOOLS
 
@@ -31,17 +32,19 @@ load_dotenv()
 
 MODEL = "claude-sonnet-4-6"
 MAX_ITERATIONS = 10
-SYSTEM_PROMPT = """You are AppMentor, an expert AI assistant specialising in ERPNext — \
-the open-source ERP built on the Frappe framework.
 
-You have access to two tools:
-  • web_search      — search the web for up-to-date ERPNext docs, forum answers, and guides
-  • read_text_file  — read a local file the user points you at
+SYSTEM_PROMPT = (
+    "You are AppMentor, an expert AI assistant for enterprise applications. "
+    "Answer questions about ERPNext, SAP Z-code, and custom applications. "
+    "Always cite sources. "
+    "Use tools to find accurate information before answering."
+)
 
-Think step-by-step. When you need information, call a tool. \
-When you have enough information to answer, reply directly without calling any more tools.
-
-Be concise but thorough. Cite sources (URLs) when you use web_search results."""
+TEST_QUESTIONS = [
+    "How do I submit an expense claim in ERPNext?",
+    "What happens if my leave approver is also on leave?",
+    "What is the difference between a Purchase Order and a Material Request in ERPNext?",
+]
 
 # ---------------------------------------------------------------------------
 # Core ReAct loop
@@ -54,21 +57,16 @@ def run_agent(question: str, verbose: bool = True) -> str:
 
     Args:
         question: The user's question.
-        verbose:  If True, print intermediate steps to stdout.
+        verbose:  If True, prints [Tool] lines and iteration headers.
 
     Returns:
-        The agent's final text answer.
+        The agent's final text answer as a plain string.
     """
     client = anthropic.Anthropic()
 
     messages: list[dict] = [{"role": "user", "content": question}]
 
     for iteration in range(1, MAX_ITERATIONS + 1):
-        if verbose:
-            print(f"\n{'─' * 60}")
-            print(f"  Iteration {iteration}/{MAX_ITERATIONS}")
-            print(f"{'─' * 60}")
-
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
@@ -77,18 +75,14 @@ def run_agent(question: str, verbose: bool = True) -> str:
             messages=messages,
         )
 
-        # Append assistant turn to history
+        # Append assistant turn to conversation history
         messages.append({"role": "assistant", "content": response.content})
 
-        if verbose:
-            print(f"  Stop reason: {response.stop_reason}")
-
-        # ── Final answer: no more tool calls ────────────────────────────────
+        # ── Final answer ─────────────────────────────────────────────────────
         if response.stop_reason == "end_turn":
-            final_text = _extract_text(response.content)
-            return final_text
+            return _extract_text(response.content)
 
-        # ── Tool use ─────────────────────────────────────────────────────────
+        # ── Tool calls ───────────────────────────────────────────────────────
         if response.stop_reason == "tool_use":
             tool_results = []
 
@@ -100,8 +94,9 @@ def run_agent(question: str, verbose: bool = True) -> str:
                 tool_input = block.input
 
                 if verbose:
-                    print(f"\n  Tool call: {tool_name}")
-                    print(f"  Input:     {json.dumps(tool_input, indent=2)}")
+                    # Compact single-line representation of the input
+                    input_repr = json.dumps(tool_input, ensure_ascii=False)
+                    print(f"[Tool] {tool_name}({input_repr})")
 
                 fn = TOOL_MAP.get(tool_name)
                 if fn is None:
@@ -112,10 +107,6 @@ def run_agent(question: str, verbose: bool = True) -> str:
                     except Exception as exc:
                         result_text = f"Tool error: {exc}"
 
-                if verbose:
-                    preview = result_text[:300].replace("\n", " ")
-                    print(f"  Result:    {preview}{'…' if len(result_text) > 300 else ''}")
-
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -124,11 +115,11 @@ def run_agent(question: str, verbose: bool = True) -> str:
                     }
                 )
 
-            # Feed observations back into the conversation
+            # Feed tool observations back into the conversation
             messages.append({"role": "user", "content": tool_results})
             continue
 
-        # Unexpected stop reason — treat remaining text as final answer
+        # Unexpected stop reason — return whatever text is present
         return _extract_text(response.content)
 
     return (
@@ -138,7 +129,7 @@ def run_agent(question: str, verbose: bool = True) -> str:
 
 
 def _extract_text(content: list) -> str:
-    """Pull plain text out of an Anthropic response content list."""
+    """Pull plain text blocks out of an Anthropic response content list."""
     parts = []
     for block in content:
         if hasattr(block, "type") and block.type == "text":
@@ -147,40 +138,47 @@ def _extract_text(content: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Entry points
+# Entry point
 # ---------------------------------------------------------------------------
 
 
-def interactive_mode() -> None:
-    """Simple REPL for multi-turn questions (each question is independent)."""
-    print("AppMentor ReAct Agent — type 'exit' or 'quit' to stop.\n")
-    while True:
-        try:
-            question = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
-
-        if not question:
-            continue
-        if question.lower() in {"exit", "quit"}:
-            print("Goodbye!")
-            break
-
-        answer = run_agent(question, verbose=True)
-        print(f"\nAppMentor: {answer}\n")
-
-
-def main() -> None:
-    if len(sys.argv) > 1:
-        # Single question mode
-        question = " ".join(sys.argv[1:])
-        print(f"Question: {question}\n")
-        answer = run_agent(question, verbose=True)
-        print(f"\nFinal Answer:\n{answer}")
-    else:
-        interactive_mode()
-
-
 if __name__ == "__main__":
-    main()
+    print("AppMentor — Week 1 ReAct Agent")
+    print("=" * 40)
+
+    if len(sys.argv) > 1:
+        # Single question passed on the command line
+        question = " ".join(sys.argv[1:])
+        print(f"\nQuestion: {question}\n")
+        answer = run_agent(question, verbose=True)
+        print(f"\nAnswer:\n{answer}\n")
+    else:
+        # Interactive mode
+        print("Type your question and press Enter.")
+        print("Press Enter with no question to run all test questions.")
+        print("Type 'exit' or 'quit' to stop.\n")
+
+        while True:
+            try:
+                question = input("Ask AppMentor: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                break
+
+            if question.lower() in {"exit", "quit"}:
+                print("Goodbye!")
+                break
+
+            if not question:
+                # Run all three built-in test questions
+                print("\nNo question entered — running all test questions.\n")
+                for i, q in enumerate(TEST_QUESTIONS, 1):
+                    print(f"\n{'=' * 60}")
+                    print(f"Test {i}: {q}")
+                    print("=" * 60)
+                    answer = run_agent(q, verbose=True)
+                    print(f"\nAnswer:\n{answer}\n")
+                break
+
+            answer = run_agent(question, verbose=True)
+            print(f"\nAnswer:\n{answer}\n")

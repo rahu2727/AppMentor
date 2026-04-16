@@ -2,8 +2,8 @@
 week1/tools.py — Tool definitions for the AppMentor ReAct agent.
 
 Implements:
-  - web_search()      using TavilyClient
-  - read_text_file()  reads a local file and returns its contents
+  - web_search()      using TavilyClient (max 3 results)
+  - read_text_file()  reads a local text / Python file
 
 Also exports:
   - TOOLS     list of Anthropic function-calling schema dicts
@@ -23,7 +23,7 @@ load_dotenv()
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str) -> str:
     """Search the web using Tavily and return a formatted string of results."""
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
@@ -31,7 +31,7 @@ def web_search(query: str, max_results: int = 5) -> str:
 
     client = TavilyClient(api_key=api_key)
     try:
-        response = client.search(query=query, max_results=max_results)
+        response = client.search(query=query, max_results=3)
     except Exception as exc:
         return f"Search failed: {exc}"
 
@@ -49,13 +49,13 @@ def web_search(query: str, max_results: int = 5) -> str:
     return "\n".join(lines).strip()
 
 
-def read_text_file(file_path: str) -> str:
-    """Read a local text file and return its contents (max 8 000 chars)."""
-    path = Path(file_path)
+def read_text_file(filepath: str) -> str:
+    """Read a local text or Python file and return its contents."""
+    path = Path(filepath)
     if not path.exists():
-        return f"Error: file not found: {file_path}"
+        return f"Error: file not found: {filepath}"
     if not path.is_file():
-        return f"Error: path is not a file: {file_path}"
+        return f"Error: path is not a file: {filepath}"
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -78,7 +78,7 @@ TOOLS: list[dict] = [
         "description": (
             "Search the web for up-to-date information. "
             "Use this when you need current facts, ERPNext documentation, "
-            "forum answers, or anything not in your training data."
+            "forum answers, SAP notes, or anything not in your training data."
         ),
         "input_schema": {
             "type": "object",
@@ -87,11 +87,6 @@ TOOLS: list[dict] = [
                     "type": "string",
                     "description": "The search query string.",
                 },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return (default 5).",
-                    "default": 5,
-                },
             },
             "required": ["query"],
         },
@@ -99,18 +94,19 @@ TOOLS: list[dict] = [
     {
         "name": "read_text_file",
         "description": (
-            "Read the contents of a local text file. "
-            "Use this to inspect configuration files, logs, or any plain-text document."
+            "Read the contents of a local text or Python file. "
+            "Use this to inspect configuration files, logs, ABAP code, "
+            "or any plain-text document the user points you at."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "file_path": {
+                "filepath": {
                     "type": "string",
                     "description": "Absolute or relative path to the file to read.",
                 },
             },
-            "required": ["file_path"],
+            "required": ["filepath"],
         },
     },
 ]
