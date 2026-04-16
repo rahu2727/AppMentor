@@ -1,46 +1,43 @@
 """
-week2/config.py — Centralised settings for the Week 2 knowledge base.
+week2/config.py — Central settings for the AppMentor Week 2 knowledge base.
 
-Import this module anywhere in week2/ to get consistent paths and parameters.
+Import CONFIG anywhere in week2/ for consistent paths and parameters.
 """
 
-from pathlib import Path
+CONFIG: dict = {
+    # ── ChromaDB ─────────────────────────────────────────────────────────────
+    "chroma_persist_dir": "./week2/chroma_db",
+    "collection_name": "appmenter_erpnext",   # intentional spelling from spec
+    "embedding_model": "all-MiniLM-L6-v2",
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+    # ── Text chunking ─────────────────────────────────────────────────────────
+    "chunking": {
+        "chunk_size": 1200,
+        "chunk_overlap": 200,
+    },
 
-# Project root (two levels up from this file)
-PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+    # ── ERPNext documentation crawler ─────────────────────────────────────────
+    # Short section names that map to docs.erpnext.com URL paths
+    "docs": {
+        "sections": [
+            "hr",
+            "accounts",
+            "projects",
+            "buying",
+            "stock",
+            "setting-up",
+        ],
+    },
 
-# Week 2 directory
-WEEK2_DIR = Path(__file__).parent.resolve()
-
-# ChromaDB persistent storage (excluded from git via .gitignore)
-CHROMA_DIR = PROJECT_ROOT / "chroma_db"
-
-# ---------------------------------------------------------------------------
-# Embedding model
-# ---------------------------------------------------------------------------
-
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-
-# ---------------------------------------------------------------------------
-# ChromaDB collection
-# ---------------------------------------------------------------------------
-
-COLLECTION_NAME = "appmentor_kb"
-
-# ---------------------------------------------------------------------------
-# Retrieval defaults
-# ---------------------------------------------------------------------------
-
-# Number of results returned by query() unless caller overrides
-DEFAULT_N_RESULTS = 5
-
-# Cosine distance thresholds for colour-coded relevance in query_test.py
-#   distance < GREEN_THRESHOLD  → green  (highly relevant)
-#   distance < YELLOW_THRESHOLD → yellow (somewhat relevant)
-#   distance >= YELLOW_THRESHOLD → red   (low relevance)
-GREEN_THRESHOLD = 0.35
-YELLOW_THRESHOLD = 0.60
+    # ── ERPNext source-code crawler (Week 3+) ────────────────────────────────
+    "code": {
+        "target_modules": [
+            "erpnext/hr",
+            "erpnext/accounts",
+            "erpnext/payroll",
+            "erpnext/projects",
+            "erpnext/buying",
+            "erpnext/stock",
+        ],
+    },
+}
