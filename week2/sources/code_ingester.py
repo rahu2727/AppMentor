@@ -192,6 +192,52 @@ def _json_to_text(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Package-root auto-detection
+# ---------------------------------------------------------------------------
+
+
+def _find_package_root(clone_dir: Path) -> Path:
+    """
+    Return the directory that directly contains the ``erpnext`` Python package.
+
+    Handles two common layouts:
+
+    * Standard direct clone::
+
+        clone_dir/
+          erpnext/
+            __init__.py
+            hr/
+
+    * Bench-style or nested checkout::
+
+        clone_dir/
+          apps/
+            erpnext/
+              erpnext/
+                __init__.py
+                hr/
+
+    Falls back to *clone_dir* unchanged if neither pattern is found, so the
+    existing "directory not found" warning still fires for genuinely missing
+    modules rather than hiding the problem silently.
+    """
+    # Pattern 1: clone_dir/erpnext/__init__.py  (most common for direct clone)
+    if (clone_dir / "erpnext" / "__init__.py").exists():
+        return clone_dir
+
+    # Pattern 2: one subdirectory level (skip hidden dirs like .git)
+    for subdir in sorted(clone_dir.iterdir()):
+        if subdir.is_dir() and not subdir.name.startswith("."):
+            if (subdir / "erpnext" / "__init__.py").exists():
+                return subdir
+
+    # Could not locate — return clone_dir so _process_module can emit the
+    # human-readable "Module directory not found" warning.
+    return clone_dir
+
+
+# ---------------------------------------------------------------------------
 # ID helpers
 # ---------------------------------------------------------------------------
 
@@ -271,8 +317,10 @@ def _process_module(
         except (json.JSONDecodeError, Exception):
             continue
 
-        # Only process actual DocType definitions
-        if data.get("doctype") != "DocType":
+        # Only process actual DocType definitions.
+        # json.loads() may return a list for patch files / translation arrays —
+        # those have no .get() method, so guard with isinstance first.
+        if not isinstance(data, dict) or data.get("doctype") != "DocType":
             continue
 
         text = _json_to_text(data)
@@ -339,10 +387,17 @@ def run(store: ChromaStore, config: dict) -> int:
         if not success:
             return 0
 
+    # ── Auto-detect where the erpnext package lives inside the repo ──────────
+    package_root = _find_package_root(clone_dir)
+    if package_root != clone_dir:
+        print(f"  erpnext package found at sub-path: {package_root}")
+    else:
+        print(f"  erpnext package root: {package_root}")
+
     # ── Walk each target module ───────────────────────────────────────────────
     total_added = 0
     for module in target_modules:
         print(f"  Processing module: {module}")
-        total_added += _process_module(module, clone_dir, store)
+        total_added += _process_module(module, package_root, store)
 
     return total_added
