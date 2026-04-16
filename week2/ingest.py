@@ -34,10 +34,10 @@ from store.chroma_store import ChromaStore
 _SOURCE_REGISTRY: dict[str, str] = {
     "forum": "sources.forum_ingester",
     "docs":  "sources.docs_ingester",
-    "code":  "sources.code_ingester",   # not built yet
+    "code":  "sources.code_ingester",
 }
 
-_SOURCES_ALL = ["forum", "docs"]   # "code" excluded from "run all" until built
+_SOURCES_ALL = ["forum", "docs", "code"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,10 +163,6 @@ def main() -> None:
         print(f"  Done. Chunks remaining: {store.count()}")
 
     sources_to_run = [args.source] if args.source else _SOURCES_ALL
-    # "code" ingester is not built yet — always skip it gracefully
-    if "code" in sources_to_run:
-        print("\n  [SKIP] code ingester not built yet — will be added in Week 3.")
-        sources_to_run = [s for s in sources_to_run if s != "code"]
 
     total_added = 0
     for source in sources_to_run:
