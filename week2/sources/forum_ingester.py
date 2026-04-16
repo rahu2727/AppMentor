@@ -1,244 +1,327 @@
 """
-week2/sources/forum_ingester.py — 20 curated ERPNext Q&A seed pairs.
+week2/sources/forum_ingester.py
+Exactly 20 curated ERPNext Q&A pairs, stored as separate question and
+answer chunks so the knowledge base can match on either.
 
-Each pair covers a different ERPNext module so the knowledge base has
-broad initial coverage. IDs are deterministic (SHA-256 of the text)
-so re-running is idempotent.
+Categories
+----------
+HR/Leave Management (4), Expense Claims (4), Payroll (2), Buying (2),
+Projects (2), Stock (2), Accounts (2), System (2)
 
-Public API:
-    pairs  = get_pairs()                 # list of (question, answer, metadata)
-    docs, metas, ids = get_documents()   # ready to pass to ChromaStore.add()
+Public API
+----------
+    from sources.forum_ingester import SEED_QA, run
+
+    chunks_added = run(store)
 """
 
+from __future__ import annotations
+
 import hashlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from store.chroma_store import ChromaStore
 
 # ---------------------------------------------------------------------------
-# 20 curated ERPNext Q&A pairs
-# format: (question, answer, module_tag)
+# 20 curated Q&A pairs — (question, answer, category)
 # ---------------------------------------------------------------------------
 
-_RAW_PAIRS: list[tuple[str, str, str]] = [
-    # ── HR ──────────────────────────────────────────────────────────────────
+SEED_QA: list[tuple[str, str, str]] = [
+    # ── HR / Leave Management (4) ────────────────────────────────────────────
     (
-        "How do I create a new Employee in ERPNext?",
-        "Go to HR > Employee > New Employee. Fill in the mandatory fields: "
-        "Employee Name, Company, Date of Joining, and Department. Save the "
-        "record. You can then add personal details, salary information, and "
-        "upload documents from the same form.",
-        "hr",
+        "How do I submit a leave application in ERPNext?",
+        "Go to HR > Leaves > Leave Application > New. Select the Leave Type "
+        "(Annual Leave, Sick Leave, etc.), enter From Date and To Date, and add "
+        "a Reason. Click Save, then Submit. An email notification is automatically "
+        "sent to the Leave Approver assigned in your Employee master. Once the "
+        "approver clicks Approve, your leave balance is deducted and the status "
+        "changes to Approved.",
+        "hr_leave",
     ),
     (
-        "How do I mark attendance in bulk in ERPNext?",
-        "Use HR > Attendance > Upload Attendance to import a CSV file with "
-        "columns Employee, Attendance Date, and Status (Present/Absent/Half Day). "
-        "Alternatively, HR > Attendance > Mark Attendance allows you to mark "
-        "multiple employees for a single date via a dialog box.",
-        "hr",
+        "What happens if my leave approver is also on leave or unavailable?",
+        "If your designated leave approver is on leave or unavailable, an HR "
+        "Manager or System Manager can approve the leave application instead. "
+        "Go to HR > Leaves > Leave Application, open the pending application, "
+        "and click Approve. Alternatively, the Employee master can be updated to "
+        "assign a substitute leave approver. You can also escalate using the "
+        "Leave Approval Notification workflow to alert a backup approver "
+        "automatically after a configurable number of days.",
+        "hr_leave",
     ),
     (
-        "How do I apply for leave in ERPNext?",
-        "Employees can apply via HR > Leaves > Leave Application > New. "
-        "Select Leave Type, From Date, To Date, and add a Reason. Submit the "
-        "application. A notification is sent to the Leave Approver set in the "
-        "Employee master. The leave balance updates automatically on approval.",
-        "hr",
+        "Where can I check my leave balance in ERPNext?",
+        "Employees can check their leave balance in two ways. First, go to "
+        "HR > Leaves > Leave Balance Report and filter by Employee and Year. "
+        "Second, open any Leave Application form and the available balance for "
+        "the selected Leave Type appears automatically in the 'Leave Balance "
+        "Before Application' field. HR Managers can view the Leave Allocation "
+        "list to see allocations for all employees.",
+        "hr_leave",
     ),
-    # ── Expense Claims ───────────────────────────────────────────────────────
+    (
+        "How do I cancel a submitted leave application in ERPNext?",
+        "Open the approved or submitted Leave Application. Click Cancel. The "
+        "leave balance is automatically restored. If the leave has already been "
+        "reflected in the payroll (e.g., leave without pay deduction), you must "
+        "also cancel or amend the relevant salary slip. Note: only the submitter, "
+        "Leave Approver, or a user with HR Manager role can cancel a submitted "
+        "leave application.",
+        "hr_leave",
+    ),
+
+    # ── Expense Claims (4) ───────────────────────────────────────────────────
     (
         "How do I submit an expense claim in ERPNext?",
-        "Go to HR > Expenses > Expense Claim > New. Select the Employee and "
-        "Expense Approver. Add expense lines with Expense Date, Expense Type, "
-        "Description, and Amount. Attach receipts, then click Submit. The "
-        "approver receives an email notification to review and approve.",
+        "Go to HR > Expenses > Expense Claim > New. Select the Employee name "
+        "and choose an Expense Approver. In the Expenses table, add one row per "
+        "expense: set Expense Date, Expense Type, Description, and Amount. "
+        "Attach scanned receipts using the Attach button. Click Save, then "
+        "Submit. The expense approver receives an email notification to review "
+        "and approve the claim. Once approved, a payment entry reimburses the "
+        "employee.",
         "expense",
     ),
     (
-        "How do I reimburse an approved expense claim in ERPNext?",
-        "After an Expense Claim is approved, go to Accounts > Accounts Payable > "
-        "Payment Entry > New. Set Payment Type to 'Pay', Party Type to 'Employee', "
-        "and select the employee. The system will show outstanding expense claims "
-        "to be settled. Select the relevant claim and submit the payment.",
+        "What happens after an expense claim is submitted in ERPNext?",
+        "After submission the expense claim status changes to Submitted and the "
+        "designated Expense Approver is notified by email. The approver opens "
+        "the claim, reviews each expense line, and clicks Approve (or Reject "
+        "with a reason). Once approved, an Accounts Payable entry is created. "
+        "To reimburse the employee, go to Accounts > Payment Entry > New, set "
+        "Party Type to Employee, select the employee, and link the approved "
+        "expense claim. Submit the payment to complete reimbursement.",
         "expense",
     ),
-    # ── Payroll ──────────────────────────────────────────────────────────────
     (
-        "How do I run payroll for a month in ERPNext?",
-        "Navigate to Payroll > Payroll Entry > New. Set Company, Payroll "
-        "Frequency, Start Date, and End Date. Click 'Get Employees' to load "
-        "eligible staff. Review the list, then click 'Create Salary Slips'. "
-        "Once all slips are validated, click 'Submit Salary Slips' and then "
-        "'Make Bank Entry' to post the accounting entries.",
+        "How do I handle foreign currency expenses in an ERPNext expense claim?",
+        "When entering an expense line in a foreign currency, set the Currency "
+        "field to the foreign currency (e.g., USD) and enter the amount in that "
+        "currency. ERPNext automatically fetches the exchange rate using the "
+        "Currency Exchange master or the live rate if enabled. The system "
+        "converts the amount to your company's base currency for accounting. "
+        "You can override the exchange rate manually in the expense line if the "
+        "actual rate on your receipt differs.",
+        "expense",
+    ),
+    (
+        "How do expense claim approval limits work in ERPNext?",
+        "ERPNext lets you define maximum claim amounts per Expense Approver. "
+        "Go to HR > Setup > Expense Claim Type and set a maximum claim amount "
+        "if needed. Additionally, in the Employee master you can set a specific "
+        "Expense Approver. If a claim exceeds the approver's authorised limit, "
+        "it can be escalated to a senior approver or HR Manager. Workflow rules "
+        "can be configured under Setup > Workflow to route high-value claims to "
+        "additional approval levels automatically.",
+        "expense",
+    ),
+
+    # ── Payroll (2) ──────────────────────────────────────────────────────────
+    (
+        "How do I view my payslip in ERPNext?",
+        "Employees can view their payslip by going to HR > Payroll > Salary "
+        "Slip and filtering by their Employee ID and the relevant month. If the "
+        "Employee Self Service portal is enabled, employees can log in and "
+        "navigate to My Payslips to view and download PDF copies of all their "
+        "salary slips directly without requiring HR access.",
         "payroll",
     ),
     (
-        "How do I set up a salary structure in ERPNext?",
-        "Go to Payroll > Salary Structure > New. Add a name and set the "
-        "payment frequency. In the Earnings table add components like Basic, "
-        "HRA, etc. In the Deductions table add PF, tax, etc. Each component "
-        "can use a formula (e.g. base * 0.4 for 40% HRA). Save and submit, "
-        "then assign it to employees via Salary Structure Assignment.",
+        "How is overtime calculated in ERPNext payroll?",
+        "Overtime in ERPNext is typically handled through a custom Salary "
+        "Component with a formula. Create a component named 'Overtime' under "
+        "Payroll > Salary Component. Set the formula to multiply overtime hours "
+        "by the hourly rate, for example: (base / 26 / 8) * overtime_hours * "
+        "1.5 for time-and-a-half. Link this component in the Salary Structure "
+        "under Earnings. Overtime hours can be fed in via Additional Salary or "
+        "by using a custom field on the Salary Slip to capture the hours before "
+        "payroll is processed.",
         "payroll",
     ),
-    # ── Buying ───────────────────────────────────────────────────────────────
+
+    # ── Buying (2) ───────────────────────────────────────────────────────────
     (
-        "How do I create a Purchase Order in ERPNext?",
-        "Go to Buying > Purchase Order > New. Select Supplier and set the "
-        "Required By date. Add items in the Items table with quantity and "
-        "rate. Check taxes in the Taxes and Charges section. Save and Submit. "
-        "You can link it to a Purchase Receipt and then a Purchase Invoice "
-        "as goods arrive and invoices come in.",
+        "How do I raise a Purchase Order in ERPNext?",
+        "Go to Buying > Purchase Order > New. Select the Supplier and set the "
+        "Required By date. Add items in the Items table with Item Code, "
+        "Quantity, Rate, and Warehouse. Review taxes in the Taxes and Charges "
+        "section. Save the draft, then Submit to confirm the order. The PO "
+        "status changes to 'To Receive and Bill'. Approval workflow can be "
+        "configured so that high-value purchase orders require a manager to "
+        "approve before submission. Once approved the supplier can be notified "
+        "by email directly from the PO.",
         "buying",
     ),
     (
-        "How do I create a Request for Quotation (RFQ) in ERPNext?",
-        "Go to Buying > Request for Quotation > New. Add items and quantities, "
-        "then add one or more suppliers in the Suppliers table. Submit the RFQ "
-        "and click 'Send Emails' to notify suppliers. Suppliers can respond via "
-        "the Supplier Portal. Once responses are in, use 'Select Supplier' on "
-        "each item to build a Purchase Order.",
+        "What is the difference between a Purchase Order and a Material Request "
+        "in ERPNext?",
+        "A Material Request is an internal document raised by a department or "
+        "warehouse to signal that stock is needed — it does not involve an "
+        "external supplier. A Purchase Order is a formal legal document sent to "
+        "a supplier to buy specific items at agreed prices and delivery dates. "
+        "The typical flow is: Material Request > Request for Quotation > "
+        "Supplier Quotation > Purchase Order > Purchase Receipt > Purchase "
+        "Invoice. A Material Request can automatically trigger the creation of "
+        "a Purchase Order through the 'Create Purchase Order' button if the "
+        "item's default supplier is configured.",
         "buying",
     ),
-    # ── Projects ─────────────────────────────────────────────────────────────
+
+    # ── Projects (2) ─────────────────────────────────────────────────────────
     (
-        "How do I create a project and track tasks in ERPNext?",
-        "Go to Projects > Project > New. Enter Project Name, Expected Start "
-        "Date, and Expected End Date. Set a Customer if it's a billable project. "
-        "In the Tasks section add task rows or open the Gantt view. Assign each "
-        "task to an employee and set priority and status. Time logs can be added "
-        "against tasks to track actual hours.",
-        "projects",
-    ),
-    (
-        "How do I log time against a project task in ERPNext?",
+        "How do I log time against a project in ERPNext?",
         "Go to Projects > Timesheets > New Timesheet. Select the Employee. "
-        "In the Time Logs table add a row: set Activity Type, From Time, To "
-        "Time, Project, and Task. Save and Submit. The logged hours appear in "
-        "the project's Actual Time field and can be used to generate a Sales "
-        "Invoice for billable projects.",
+        "In the Time Logs table, add a row and set Activity Type, Project, "
+        "Task (optional), From Time, and To Time. The Hours field is calculated "
+        "automatically. Save and Submit the timesheet. The logged hours appear "
+        "in the project's Actual Time field. For billable projects, submitted "
+        "timesheets can be used to generate a Sales Invoice via the 'Make "
+        "Sales Invoice' button on the project.",
         "projects",
     ),
-    # ── Stock ────────────────────────────────────────────────────────────────
     (
-        "How do I do a stock reconciliation in ERPNext?",
-        "Go to Stock > Tools > Stock Reconciliation > New. Set Purpose to "
-        "'Stock Reconciliation'. Add items with their Warehouse, Qty, and "
-        "Valuation Rate. The system calculates the difference from book stock. "
-        "Submit to post the adjustment. A Stock Ledger Entry is created for "
-        "the difference, and P&L is affected if values differ.",
-        "stock",
+        "What is the difference between a Project and a Task in ERPNext?",
+        "A Project is the top-level container — it has a budget, timeline, "
+        "customer, and overall status. Tasks are individual work items nested "
+        "inside a project. Each task can be assigned to a specific employee, "
+        "given a priority (Low/Medium/High/Urgent), estimated hours, and "
+        "a status (Open/Working/Pending Review/Completed/Cancelled). Time logs "
+        "and expenses are recorded at the task level and roll up to the project. "
+        "You can visualise tasks on a Gantt chart from the project form.",
+        "projects",
     ),
+
+    # ── Stock (2) ────────────────────────────────────────────────────────────
     (
         "How do I transfer stock between warehouses in ERPNext?",
-        "Go to Stock > Stock Transactions > Stock Entry > New. Set Purpose to "
-        "'Material Transfer'. Add items with Source Warehouse and Target "
-        "Warehouse. Enter quantity. Save and Submit. The stock ledger is updated "
-        "immediately. You can also use the 'Material Transfer (Return)' purpose "
-        "to reverse a transfer.",
+        "Go to Stock > Stock Transactions > Stock Entry > New. Set the Purpose "
+        "to 'Material Transfer'. In the Items table, add each item with the "
+        "Source Warehouse and Target Warehouse. Enter the Quantity to transfer. "
+        "Save and Submit. The stock ledger is updated immediately — stock is "
+        "deducted from the source warehouse and added to the target warehouse. "
+        "You can also initiate a transfer directly from a Material Request by "
+        "selecting 'Transfer' as the purpose.",
         "stock",
     ),
     (
-        "How do I set the reorder level for an item in ERPNext?",
-        "Open the Item master (Stock > Items > select item). Scroll to the "
-        "'Auto Reorder' section and enable 'Reorder'. Set the Reorder Level "
-        "and Reorder Qty. When stock in the selected warehouse falls below the "
-        "Reorder Level, ERPNext's scheduler creates a Material Request "
-        "automatically.",
+        "How do I check current stock levels in ERPNext?",
+        "Go to Stock > Reports > Stock Balance to see the current quantity and "
+        "valuation for all items across all warehouses. Filter by Item, "
+        "Warehouse, or Item Group. For a single item, open the Item master and "
+        "click the 'Stock Ledger' button to see all movements. You can also "
+        "use Stock > Reports > Itemwise Recommended Reorder Level to identify "
+        "items that need replenishment based on reorder levels.",
         "stock",
     ),
-    # ── Accounts ─────────────────────────────────────────────────────────────
+
+    # ── Accounts (2) ────────────────────────────────────────────────────────
     (
-        "How do I reconcile a bank account in ERPNext?",
+        "What is the difference between a Sales Invoice and a Delivery Note "
+        "in ERPNext?",
+        "A Delivery Note records the physical movement of goods from your "
+        "warehouse to the customer — it updates stock levels but does not post "
+        "any accounting entry by default. A Sales Invoice is the financial "
+        "document that creates the accounts receivable entry and records "
+        "revenue. The typical flow is: Sales Order > Delivery Note > Sales "
+        "Invoice. Alternatively, you can bill before delivery (Sales Order > "
+        "Sales Invoice > Delivery Note). ERPNext links them so stock and "
+        "accounting remain consistent.",
+        "accounts",
+    ),
+    (
+        "How do I do bank reconciliation in ERPNext?",
         "Go to Accounts > Banking and Payments > Bank Reconciliation Statement. "
-        "Select the Bank Account and date range. Upload the bank statement CSV "
-        "or match entries manually. For each bank transaction click 'Match' to "
-        "link it to an existing Payment Entry or Journal Entry. Unmatched "
-        "items indicate missing entries that need to be created.",
+        "Select the Bank Account and the date range. You can upload a bank "
+        "statement CSV using the Upload Bank Statement button. ERPNext tries "
+        "to auto-match transactions to existing Payment Entries or Journal "
+        "Entries. For each unmatched bank transaction, click Match to link it "
+        "manually, or Create Entry to record a new payment or journal. All "
+        "matched items move to the reconciled list. Outstanding items indicate "
+        "missing entries.",
         "accounts",
     ),
+
+    # ── System (2) ──────────────────────────────────────────────────────────
     (
-        "How do I create a Journal Entry in ERPNext?",
-        "Go to Accounts > General Ledger > Journal Entry > New. Set Posting "
-        "Date and Entry Type (e.g. Journal Entry). In the Accounting Entries "
-        "table add debit and credit rows ensuring they balance to zero. Each "
-        "row requires an Account and Amount in Company Currency. Add a Remark "
-        "for audit trail. Save and Submit.",
-        "accounts",
-    ),
-    (
-        "How does ERPNext handle GST in Sales Invoices?",
-        "ERPNext has a built-in India GST module. In the Sales Invoice, set "
-        "the Customer's GSTIN and the Company's GSTIN. The HSN/SAC code on "
-        "each item drives the applicable GST rate. Tax templates (CGST+SGST "
-        "for intra-state, IGST for inter-state) are applied automatically based "
-        "on shipping address. GSTR-1 and GSTR-3B reports are generated under "
-        "Accounts > GST India.",
-        "accounts",
-    ),
-    # ── System / Setup ───────────────────────────────────────────────────────
-    (
-        "How do I create a custom field in ERPNext without coding?",
-        "Go to Setup > Customize > Customize Form. Select the DocType you want "
-        "to modify (e.g. 'Sales Invoice'). Click 'Add Row' in the Fields table. "
-        "Set Label, Field Type (Data, Select, Link, etc.), and optionally set "
-        "Insert After to control position. Save. The field appears immediately "
-        "without a system restart. Use Field Name for API access.",
+        "How do I reset my ERPNext password?",
+        "On the ERPNext login page click 'Forgot Password' and enter your "
+        "registered email address. A password reset link is emailed to you. "
+        "Click the link and enter a new password. If you cannot access your "
+        "email, ask an Administrator to go to Setup > Users, open your user "
+        "record, enter a new password in the 'New Password' field, and save. "
+        "For administrator password recovery when email is unavailable, use "
+        "the bench command: bench --site <site-name> set-admin-password "
+        "<new-password> from the server terminal.",
         "system",
     ),
     (
-        "How do I set up email notifications for document submissions in ERPNext?",
-        "Go to Setup > Email > Notification > New. Set Document Type and Event "
-        "(e.g. 'On Submit'). Add conditions if needed (e.g. status == 'Submitted'). "
-        "In Recipients add email addresses or use a field like "
-        "'{doc.email_id}'. Write the Subject and Message using Jinja2 "
-        "templating ({{ doc.field_name }}). Save and Enable.",
-        "system",
-    ),
-    (
-        "How do I reset a user's password in ERPNext?",
-        "As Administrator go to Setup > Users > select the User. Click "
-        "'Send Password Reset Email' to send a self-service reset link. "
-        "Alternatively, type a new password directly in the 'New Password' "
-        "field and click Save. For System Manager access lost, use the "
-        "bench command: bench --site <site-name> set-admin-password <new-password>.",
+        "How do I export ERPNext data to Excel?",
+        "Open any list view (e.g., Sales Invoice list). Apply filters as "
+        "needed to narrow the records. Click the Menu button (three dots) in "
+        "the top-right corner and select 'Export'. Choose 'Excel' as the "
+        "format. Select which columns to include and click Export. The file "
+        "downloads as an XLSX file. For large datasets use the Data Export "
+        "tool under Setup > Data > Export Data, which lets you export entire "
+        "DocTypes including all fields in one go.",
         "system",
     ),
 ]
 
+# Verify count at import time so mismatches fail loudly during development
+assert len(SEED_QA) == 20, f"Expected 20 SEED_QA pairs, got {len(SEED_QA)}"
+
 
 # ---------------------------------------------------------------------------
-# Public helpers
+# Ingester entry point
 # ---------------------------------------------------------------------------
 
 
-def _make_id(text: str) -> str:
-    """Return a deterministic 16-char hex ID derived from the text content."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def get_pairs() -> list[tuple[str, str, dict]]:
+def run(store: ChromaStore) -> int:
     """
-    Return all Q&A pairs as (question_text, answer_text, metadata_dict).
+    Ingest all SEED_QA pairs into *store* as separate question and answer chunks.
 
-    The combined question+answer is stored as the document so semantic
-    search can match on either the question or the answer.
+    Each Q&A pair produces two chunks:
+      - chunk_type = "question"
+      - chunk_type = "answer"
+
+    IDs are deterministic (MD5 of the text) so re-running is idempotent.
+
+    Returns
+    -------
+    int
+        Total number of chunks added or updated.
     """
-    pairs = []
-    for q, a, module in _RAW_PAIRS:
-        pairs.append((q, a, {"source": "forum", "module": module, "question": q}))
-    return pairs
+    texts: list[str] = []
+    metadatas: list[dict] = []
+    ids: list[str] = []
 
+    for question, answer, category in SEED_QA:
+        # Question chunk
+        q_id = hashlib.md5(f"q:{question}".encode("utf-8")).hexdigest()
+        texts.append(question)
+        metadatas.append(
+            {
+                "source": "forum",
+                "file_type": "forum_qa",
+                "category": category,
+                "chunk_type": "question",
+            }
+        )
+        ids.append(q_id)
 
-def get_documents() -> tuple[list[str], list[dict], list[str]]:
-    """
-    Return (documents, metadatas, ids) ready for ChromaStore.add().
+        # Answer chunk
+        a_id = hashlib.md5(f"a:{answer}".encode("utf-8")).hexdigest()
+        texts.append(answer)
+        metadatas.append(
+            {
+                "source": "forum",
+                "file_type": "forum_qa",
+                "category": category,
+                "chunk_type": "answer",
+            }
+        )
+        ids.append(a_id)
 
-    The document text is 'Q: <question>\\nA: <answer>' so the embedding
-    captures both the intent and the answer.
-    """
-    documents, metadatas, ids = [], [], []
-    for q, a, meta in get_pairs():
-        doc_text = f"Q: {q}\nA: {a}"
-        documents.append(doc_text)
-        metadatas.append(meta)
-        ids.append(_make_id(doc_text))
-    return documents, metadatas, ids
+    return store.add(texts=texts, metadatas=metadatas, ids=ids)

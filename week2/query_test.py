@@ -2,107 +2,100 @@
 week2/query_test.py — Test runner for the AppMentor knowledge base.
 
 Runs 9 predefined queries covering all ERPNext modules and prints
-colour-coded relevance scores based on cosine distance:
+plain-text relevance labels based on cosine distance.
 
-    GREEN  (distance < 0.35) → highly relevant
-    YELLOW (distance < 0.60) → somewhat relevant
-    RED    (distance ≥ 0.60) → low relevance
+Relevance thresholds (cosine distance, lower = more similar):
+    High   : distance < 0.3
+    Medium : distance < 0.5
+    Low    : distance >= 0.5
 
-Usage:
+NOTE: No ANSI colour codes are used — plain text only, safe on Windows
+PowerShell which does not reliably render ANSI escape sequences.
+
+Usage
+-----
     python week2/query_test.py                        # run all 9 test queries
-    python week2/query_test.py --query "How do I …"  # single query
-    python week2/query_test.py --interactive          # REPL mode
-    python week2/query_test.py --n 3                  # top-3 results per query
+    python week2/query_test.py --query "How do I..."  # single query
+    python week2/query_test.py --interactive          # live Q&A mode (Ctrl+C to exit)
+    python week2/query_test.py --n 5                  # top-5 results per query
 """
+
+from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 
-# Ensure week2/ is importable regardless of cwd
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import GREEN_THRESHOLD, YELLOW_THRESHOLD
+from config import CONFIG
 from store.chroma_store import ChromaStore
 
 # ---------------------------------------------------------------------------
-# ANSI colour helpers (works in most terminals; degrades gracefully on Windows)
+# Relevance thresholds
 # ---------------------------------------------------------------------------
 
-RESET = "\033[0m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-
-
-def _colour(distance: float) -> str:
-    if distance < GREEN_THRESHOLD:
-        return GREEN
-    if distance < YELLOW_THRESHOLD:
-        return YELLOW
-    return RED
+_HIGH_THRESHOLD   = 0.3   # distance < 0.3  → High
+_MEDIUM_THRESHOLD = 0.5   # distance < 0.5  → Medium
+                           # distance >= 0.5 → Low
 
 
 def _label(distance: float) -> str:
-    if distance < GREEN_THRESHOLD:
-        return "HIGH"
-    if distance < YELLOW_THRESHOLD:
-        return "MED "
-    return "LOW "
+    if distance < _HIGH_THRESHOLD:
+        return "High  "
+    if distance < _MEDIUM_THRESHOLD:
+        return "Medium"
+    return "Low   "
 
 
 # ---------------------------------------------------------------------------
-# Predefined test queries (one per ERPNext module)
+# 9 predefined test queries
 # ---------------------------------------------------------------------------
 
-TEST_QUERIES: list[tuple[str, str]] = [
-    ("hr", "How do I add a new employee to the system?"),
-    ("hr", "What is the process to apply for annual leave?"),
-    ("expense", "How do employees submit expense reimbursements?"),
-    ("payroll", "How do I generate salary slips at month end?"),
-    ("buying", "Steps to raise a purchase order for a supplier"),
-    ("projects", "How do I track hours worked on a project?"),
-    ("stock", "How do I move inventory between two warehouses?"),
-    ("accounts", "How do I reconcile bank transactions?"),
-    ("system", "How can an administrator reset a user password?"),
+TEST_QUERIES: list[str] = [
+    "How do I submit an expense claim?",
+    "What happens if my leave approver is on leave?",
+    "How do I approve a purchase order?",
+    "Where can I check my leave balance?",
+    "How is overtime calculated in payroll?",
+    "How do I transfer stock between warehouses?",
+    "What is the difference between invoice and delivery note?",
+    "How do I reset my ERPNext password?",
+    "How do I log time against a project?",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Display helpers
+# Display
 # ---------------------------------------------------------------------------
 
 
-def print_results(query: str, results: list[dict], n: int) -> None:
-    print(f"\n{BOLD}Query:{RESET} {query}")
-    print("─" * 72)
+def _print_result_block(query: str, results: list[dict], n: int) -> None:
+    print(f"\nQuery: {query}")
+    print("-" * 72)
 
     if not results:
-        print("  (no results — is the collection empty? Run ingest.py first)")
+        print("  (no results — run: python week2/ingest.py --source forum)")
         return
 
     for i, r in enumerate(results[:n], 1):
-        dist = r["distance"]
-        col = _colour(dist)
-        label = _label(dist)
-        meta = r["metadata"]
-        module = meta.get("module", "?")
-        source = meta.get("source", "?")
+        dist     = r["distance"]
+        label    = _label(dist)
+        source   = r["metadata"].get("source", "?")
+        text     = r["text"].replace("\n", " ")[:120]
 
-        # Trim document text for display
-        text = r["text"].replace("\n", " ")
-        if len(text) > 160:
-            text = text[:157] + "…"
-
-        print(
-            f"  {col}[{label} dist={dist:.4f}]{RESET} "
-            f"{DIM}[{source}/{module}]{RESET}\n"
-            f"    {text}"
-        )
+        print(f"  [{i}] Relevance: {label}  Distance: {dist:.3f}  Source: {source}")
+        print(f"       {text}")
 
     print()
+
+
+def _make_store() -> ChromaStore:
+    return ChromaStore(
+        persist_dir=CONFIG["chroma_persist_dir"],
+        collection_name=CONFIG["collection_name"],
+        embedding_model=CONFIG["embedding_model"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,41 +104,59 @@ def print_results(query: str, results: list[dict], n: int) -> None:
 
 
 def run_all_tests(store: ChromaStore, n: int) -> None:
-    print(f"\n{BOLD}AppMentor Knowledge Base — Query Test Suite{RESET}")
-    print(f"Running {len(TEST_QUERIES)} queries, top-{n} results each\n")
+    print("\nAppMentor Knowledge Base — Query Test Suite")
+    print(f"Running {len(TEST_QUERIES)} queries, top-{n} results each")
     print(
-        f"Relevance legend:  "
-        f"{GREEN}GREEN  < {GREEN_THRESHOLD:.2f}{RESET}  "
-        f"{YELLOW}YELLOW < {YELLOW_THRESHOLD:.2f}{RESET}  "
-        f"{RED}RED ≥ {YELLOW_THRESHOLD:.2f}{RESET}"
+        f"Relevance:  High (dist < {_HIGH_THRESHOLD})  "
+        f"Medium (dist < {_MEDIUM_THRESHOLD})  "
+        f"Low (dist >= {_MEDIUM_THRESHOLD})"
     )
 
-    for _module, query in TEST_QUERIES:
+    pass_count = 0
+    fail_queries: list[str] = []
+
+    for query in TEST_QUERIES:
         results = store.query(query, n_results=n)
-        print_results(query, results, n)
+        _print_result_block(query, results, n)
+
+        # Check if top result is at least Medium relevance
+        if results and results[0]["distance"] < _MEDIUM_THRESHOLD:
+            pass_count += 1
+        else:
+            fail_queries.append(query)
+
+    print("=" * 72)
+    print(f"Summary: {pass_count}/{len(TEST_QUERIES)} queries scored High or Medium relevance")
+    if fail_queries:
+        print("Low relevance (may need more data):")
+        for q in fail_queries:
+            print(f"  - {q}")
+    print()
 
 
 def run_single_query(store: ChromaStore, query: str, n: int) -> None:
     results = store.query(query, n_results=n)
-    print_results(query, results, n)
+    _print_result_block(query, results, n)
 
 
 def interactive_mode(store: ChromaStore, n: int) -> None:
-    print(f"\n{BOLD}AppMentor KB — Interactive Query Mode{RESET}")
-    print("Type your question and press Enter. Type 'exit' to quit.\n")
-    while True:
-        try:
-            query = input("Query: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
-        if not query:
-            continue
-        if query.lower() in {"exit", "quit"}:
-            print("Goodbye!")
-            break
-        results = store.query(query, n_results=n)
-        print_results(query, results, n)
+    print("\nAppMentor KB — Interactive Query Mode")
+    print("Type your question and press Enter. Press Ctrl+C to exit.\n")
+    try:
+        while True:
+            try:
+                query = input("Ask AppMentor: ").strip()
+            except EOFError:
+                break
+            if not query:
+                continue
+            if query.lower() in {"exit", "quit"}:
+                break
+            results = store.query(query, n_results=n)
+            _print_result_block(query, results, n)
+    except KeyboardInterrupt:
+        pass
+    print("\nGoodbye!")
 
 
 # ---------------------------------------------------------------------------
@@ -153,33 +164,43 @@ def interactive_mode(store: ChromaStore, n: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="AppMentor KB query tester with colour-coded relevance scores",
-    )
-    p.add_argument("--query", "-q", help="Run a single query instead of the test suite.")
-    p.add_argument(
-        "--interactive", "-i", action="store_true", help="Enter interactive REPL mode."
+        description="AppMentor KB query tester with plain-text relevance labels",
     )
     p.add_argument(
-        "--n", "-n", type=int, default=3, help="Number of results per query (default 3)."
+        "--query", "-q",
+        help="Run a single query instead of the full test suite.",
+    )
+    p.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Enter interactive Q&A mode (Ctrl+C to exit).",
+    )
+    p.add_argument(
+        "--n", "-n",
+        type=int,
+        default=3,
+        help="Number of results per query (default: 3).",
     )
     return p
 
 
 def main() -> None:
-    parser = build_parser()
+    parser = _build_parser()
     args = parser.parse_args()
 
-    store = ChromaStore()
+    store = _make_store()
     total = store.count()
-    print(f"Collection contains {total} document(s).")
+    print(f"Collection contains {total} chunk(s).")
 
     if total == 0:
         print(
-            "\nThe collection is empty. Run this first:\n"
+            "\nCollection is empty. Populate it first:\n"
             "  python week2/ingest.py --source forum\n"
         )
+        if not args.interactive:
+            return
 
     if args.interactive:
         interactive_mode(store, args.n)
