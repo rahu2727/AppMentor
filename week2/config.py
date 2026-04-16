@@ -4,6 +4,8 @@ week2/config.py — Central settings for the AppMentor Week 2 knowledge base.
 Import CONFIG anywhere in week2/ for consistent paths and parameters.
 """
 
+import os
+
 CONFIG: dict = {
     # ── ChromaDB ─────────────────────────────────────────────────────────────
     "chroma_persist_dir": "./week2/chroma_db",
@@ -16,9 +18,11 @@ CONFIG: dict = {
         "chunk_overlap": 200,
     },
 
-    # ── ERPNext documentation crawler ─────────────────────────────────────────
-    # Short section names that map to docs.erpnext.com URL paths
+    # ── ERPNext documentation (GitHub markdown clone) ────────────────────────
     "docs": {
+        # Local directory for the cloned docs repo (relative to project root)
+        "clone_dir": os.path.join("week2", "data", "erpnext_docs"),
+        # Section names kept for reference / future use
         "sections": [
             "hr",
             "accounts",
