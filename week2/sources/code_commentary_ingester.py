@@ -21,7 +21,7 @@ RouterAgent — nothing is hardcoded here.
 Public API
 ----------
     from sources.code_commentary_ingester import run
-    chunks_added = run(store, config_loader, dry_run=False, max_functions=999)
+    chunks_added = run(store, config_loader, dry_run=False, max_functions=9999)
 """
 
 from __future__ import annotations
@@ -256,7 +256,7 @@ def run(
     store: ChromaStore,
     config_loader,
     dry_run: bool = False,
-    max_functions: int = 999,
+    max_functions: int = 9999,
 ) -> int:
     """
     Generate AI commentary for Python functions from configured repos.
@@ -349,10 +349,23 @@ def run(
             print(f"  {module['name']}: {module_count} qualifying functions found")
 
     total_found = len(all_functions)
-    to_process  = min(total_found, max_functions)
+
+    # ── Check which functions are already in ChromaDB ─────────────────────────
+    all_ids      = [_commentary_id(f[2], f[0]) for f in all_functions]
+    already_done = 0
+    try:
+        existing = store._collection.get(ids=all_ids, include=[])
+        already_done = len(existing["ids"]) if existing and existing["ids"] else 0
+    except Exception:
+        already_done = 0
+
+    remaining  = total_found - already_done
+    to_process = min(remaining, max_functions)
 
     print(f"\n  Total qualifying functions : {total_found}")
-    print(f"  Will process              : {to_process}  (max_functions={max_functions})")
+    print(f"  Already processed         : {already_done}")
+    print(f"  Remaining                 : {remaining}")
+    print(f"  Will process              : {to_process}")
 
     if not dry_run:
         estimated = to_process * _COST_PER_FUNCTION
@@ -371,9 +384,22 @@ def run(
     client             = anthropic.Anthropic()
     total_chunks_added = 0
     processed          = 0
+    skip_count         = 0
     cost_so_far        = 0.0
 
-    for fn_name, fn_source, rel_path, module_label, line_count in all_functions[:to_process]:
+    for fn_name, fn_source, rel_path, module_label, line_count in all_functions:
+        if processed >= to_process:
+            break
+
+        # Skip functions already in ChromaDB — avoids redundant API calls
+        existing_id = _commentary_id(rel_path, fn_name)
+        try:
+            existing = store._collection.get(ids=[existing_id], include=[])
+            if existing and len(existing["ids"]) > 0:
+                skip_count += 1
+                continue
+        except Exception:
+            pass  # not found — proceed with API call
 
         commentary_text_raw, prompt_name, prompt_version, expert = _generate_commentary(
             client, fn_name, rel_path, module_label,
@@ -437,8 +463,9 @@ def run(
         time.sleep(api_delay)
 
     print("\n  Commentary complete:")
-    print(f"    Functions processed : {processed}")
-    print(f"    Chunks added        : {total_chunks_added}")
-    print(f"    Estimated cost      : ${cost_so_far:.2f}")
+    print(f"    Skipped (already processed): {skip_count}")
+    print(f"    New functions processed    : {processed}")
+    print(f"    Chunks added this run      : {total_chunks_added}")
+    print(f"    Estimated cost this run    : ${cost_so_far:.2f}")
 
     return total_chunks_added
