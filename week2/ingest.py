@@ -12,6 +12,7 @@ Usage
     python week2/ingest.py --source docs        # crawl documentation
     python week2/ingest.py --source code        # ingest source code
     python week2/ingest.py --source commentary  # AI function commentary
+    python week2/ingest.py --source call_graph  # AST call graph (no API cost)
     python week2/ingest.py --reset              # wipe DB, then run all
     python week2/ingest.py --stats              # show stats and exit
     python week2/ingest.py --source commentary --dry-run
@@ -42,6 +43,7 @@ _SOURCE_REGISTRY: dict[str, str] = {
     "docs":        "sources.docs_ingester",
     "code":        "sources.code_ingester",
     "commentary":  "sources.code_commentary_ingester",
+    "call_graph":  "sources.call_graph_ingester",
 }
 
 # Default run excludes commentary — it calls the Claude API and incurs cost.
@@ -144,6 +146,7 @@ Examples:
   python week2/ingest.py --source commentary     # AI commentary (costs ~$7)
   python week2/ingest.py --source commentary --dry-run
   python week2/ingest.py --source commentary --max-functions 20
+  python week2/ingest.py --source call_graph     # AST call graph (no API cost)
   python week2/ingest.py --reset                 # wipe then run all
   python week2/ingest.py --stats                 # show stats and exit
 """,
