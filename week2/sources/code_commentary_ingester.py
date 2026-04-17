@@ -187,11 +187,16 @@ def _raw_code_id(file_path: str, function_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are a senior enterprise software developer "
-    "reviewing Python code. Write a concise plain English "
-    "explanation that a business analyst or new developer "
-    "can understand. Focus on WHAT the function does and "
-    "WHY, not HOW. Use business language where possible."
+    "You are a senior enterprise software developer reviewing "
+    "Python code. Write a concise plain English explanation "
+    "that a business analyst or new developer can understand. "
+    "Focus on WHAT the function does and WHY, not HOW. "
+    "Use business language throughout. Never use programming "
+    "terms like iterate, loop, return, or boolean. Replace "
+    "them with business equivalents \u2014 for example say "
+    "\"the system moves to the next stage\" not \"returns true\". "
+    "Always state whether the function runs automatically "
+    "or requires a user action."
 )
 
 
@@ -212,12 +217,16 @@ def _generate_commentary(
         f"Code:\n{source_code}\n\n"
         "Write a commentary covering:\n"
         "1. What this function does (one sentence)\n"
-        "2. Business purpose — what business process does it serve\n"
+        "2. Business purpose \u2014 what business process does it serve\n"
         "3. Key inputs and what they represent in business terms\n"
-        "4. What it returns or what change it makes\n"
+        "4. What it changes or what action it triggers in the system\n"
         "5. Any important business rules or validations embedded\n"
-        "6. Edge cases or error conditions handled\n\n"
-        "Keep the total response under 150 words."
+        "6. Edge cases or error conditions handled\n"
+        "7. Is this triggered automatically by the system or "
+        "manually by a user? What event causes it to run?\n\n"
+        "Keep the total response under 200 words.\n"
+        "Complex functions with multiple business rules may use "
+        "the full limit. Simple functions should be shorter."
     )
 
     try:
