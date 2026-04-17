@@ -4,22 +4,18 @@ Reads Python functions from ERPNext and Frappe HRMS source code, generates
 plain-English commentary via the Claude API, and stores both commentary and
 raw code in ChromaDB.
 
-Repos used
-----------
-  ERPNext  — https://github.com/frappe/erpnext.git
-             -> week2/data/erpnext_repo  (buying, projects)
-  Frappe HRMS — https://github.com/frappe/hrms.git
-             -> week2/data/hrms_repo     (hr, payroll)
+Repos
+-----
+  REPO 1: week2/data/erpnext_repo  (buying, projects)
+  REPO 2: week2/data/hrms_repo     (hr, payroll)
 
-Note: HR and Payroll were split out of the ERPNext monorepo into the
-separate frappe/hrms app in ERPNext v14. They no longer exist in erpnext/hr
-or erpnext/payroll.
+Note: HR and Payroll were split from ERPNext into the separate frappe/hrms
+app in ERPNext v14. They no longer exist in the main erpnext repo.
 
-Excluded from commentary (cost control)
------------------------------------------
-  erpnext/stock    — 150+ files, complex valuation & perpetual-inventory
-                     logic; too expensive and noisy for a demo run.
-  erpnext/accounts — similar scale and depth.
+Excluded (cost control)
+-----------------------
+  erpnext/stock    — 150+ files, complex valuation & perpetual-inventory logic
+  erpnext/accounts — similar scale and depth
 
 Public API
 ----------
@@ -31,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -47,41 +44,8 @@ from store.chroma_store import ChromaStore
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Repo configurations
+# Constants
 # ---------------------------------------------------------------------------
-
-# Maps relative repo path -> git clone URL
-_REPO_URLS: dict[str, str] = {
-    "week2/data/erpnext_repo": "https://github.com/frappe/erpnext.git",
-    "week2/data/hrms_repo":    "https://github.com/frappe/hrms.git",
-}
-
-# Each entry targets one Python package sub-module.
-#   repo_path  — relative path from project root to the cloned repo dir
-#   module     — path inside the package root to the module folder
-#   label      — human-readable name used in progress messages
-_DEFAULT_MODULE_SPECS: list[dict] = [
-    {
-        "repo_path": "week2/data/erpnext_repo",
-        "module":    "erpnext/buying",
-        "label":     "buying",
-    },
-    {
-        "repo_path": "week2/data/erpnext_repo",
-        "module":    "erpnext/projects",
-        "label":     "projects",
-    },
-    {
-        "repo_path": "week2/data/hrms_repo",
-        "module":    "hrms/hr",
-        "label":     "hr",
-    },
-    {
-        "repo_path": "week2/data/hrms_repo",
-        "module":    "hrms/payroll",
-        "label":     "payroll",
-    },
-]
 
 # Cost estimate for claude-sonnet-4-6 (input $3/MTok, output $15/MTok).
 # Average function: ~300 input tokens + ~200 output tokens ≈ $0.004 each.
@@ -90,9 +54,36 @@ _COST_PER_FUNCTION: float = 0.004
 _MIN_FUNCTION_LINES: int = 5    # skip trivial one-liners and property wrappers
 _API_DELAY: float = 0.5         # seconds between API calls (rate-limit buffer)
 
+_HRMS_REPO_URL    = "https://github.com/frappe/hrms.git"
+_ERPNEXT_REPO_URL = "https://github.com/frappe/erpnext.git"
+
 
 # ---------------------------------------------------------------------------
-# Repo helpers
+# Module path resolution
+# ---------------------------------------------------------------------------
+
+
+def _locate_module(repo_dir: Path, candidates: list[str], label: str) -> Path | None:
+    """
+    Try each candidate sub-path inside *repo_dir* in order.
+
+    Prints [OK] with the full path on the first match, or [WARN] if none
+    of the candidates exist.  Uses os.path.isdir() for the check.
+
+    Returns the matching Path, or None if nothing was found.
+    """
+    for candidate in candidates:
+        full_path = repo_dir / candidate
+        if os.path.isdir(full_path):
+            print(f"  [OK] Found {label} module at: {full_path}")
+            return full_path
+
+    print(f"  [WARN] Could not find {label} module in {repo_dir.name} — skipping")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Repo clone helpers (used when a repo is missing in non-dry-run mode)
 # ---------------------------------------------------------------------------
 
 
@@ -109,7 +100,7 @@ def _clone_repo(clone_dir: Path, url: str, label: str) -> bool:
         )
         return False
 
-    print(f"  Cloning {label} repo (shallow) into {clone_dir} ...")
+    print(f"  Cloning {label} (shallow) into {clone_dir} ...")
     print("  This may take 1-5 minutes depending on your connection.")
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
@@ -119,7 +110,7 @@ def _clone_repo(clone_dir: Path, url: str, label: str) -> bool:
                 "git", "clone",
                 "--depth", "1",
                 "--single-branch",
-                "--config", "core.protectNTFS=false",  # Windows NTFS safety
+                "--config", "core.protectNTFS=false",   # Windows NTFS safety
                 url,
                 str(clone_dir),
             ],
@@ -143,55 +134,6 @@ def _clone_repo(clone_dir: Path, url: str, label: str) -> bool:
         return False
 
 
-def _find_package_root(clone_dir: Path, package_name: str) -> Path:
-    """
-    Return the directory that directly contains *package_name*/__init__.py.
-
-    Handles two common layouts:
-      clone_dir/{package_name}/__init__.py       (standard direct clone)
-      clone_dir/{subdir}/{package_name}/__init__.py  (nested checkout)
-
-    Falls back to clone_dir unchanged so callers get a clear "not found"
-    warning rather than a silent wrong path.
-    """
-    if (clone_dir / package_name / "__init__.py").exists():
-        return clone_dir
-
-    for subdir in sorted(clone_dir.iterdir()):
-        if subdir.is_dir() and not subdir.name.startswith("."):
-            if (subdir / package_name / "__init__.py").exists():
-                return subdir
-
-    return clone_dir
-
-
-def _find_module_dir(package_root: Path, module_path: str) -> Path | None:
-    """
-    Resolve *module_path* relative to *package_root*, trying two layouts:
-
-    Primary  : package_root / module_path          (e.g. .../hrms/hr)
-    Fallback : package_root / parts[0] / module    (e.g. .../hrms/hrms/hr)
-
-    The fallback handles repos where the package sits one directory deeper
-    than _find_package_root detected (e.g. hrms/hrms/ inside an hrms/ repo).
-
-    Returns the resolved Path or None if neither location exists.
-    """
-    primary = package_root / module_path
-    if primary.exists():
-        return primary
-
-    # Fallback: insert the top-level package name as an extra directory
-    parts = Path(module_path).parts          # ('hrms', 'hr')
-    if len(parts) >= 2:
-        alt = package_root / parts[0] / module_path   # hrms/hrms/hr
-        if alt.exists():
-            print(f"  [INFO] Using alternative path: {alt}")
-            return alt
-
-    return None
-
-
 # ---------------------------------------------------------------------------
 # AST function extraction
 # ---------------------------------------------------------------------------
@@ -204,7 +146,7 @@ def _extract_functions(file_path: Path) -> list[tuple[str, str, int]]:
 
     Excluded:
     - Fewer than _MIN_FUNCTION_LINES lines  (too trivial)
-    - Dunder methods  __name__              (infrastructure, not business logic)
+    - Dunder methods __name__               (infrastructure, not business logic)
     - Names starting with test_             (test helpers)
     """
     try:
@@ -333,9 +275,9 @@ def run(
     config : dict
         CONFIG dict from week2/config.py.
     dry_run : bool
-        If True, scan and report without calling the API or storing anything.
+        If True, scan and count without calling the API or storing anything.
     max_functions : int
-        Cap on functions to process (default 999). Set to 20 for a test run.
+        Cap on functions to process (default 999). Use 20 for a test run.
 
     Returns
     -------
@@ -344,92 +286,84 @@ def run(
     """
     project_root = Path(__file__).parent.parent.parent
 
-    # ── Step 1: ensure all repos are cloned ──────────────────────────────────
-    print("  Checking repositories ...")
+    # ── Derive both repo paths from config ───────────────────────────────────
+    erpnext_repo_path = config.get("code", {}).get(
+        "clone_dir", "week2/data/erpnext_repo"
+    )
+    hrms_repo_path = os.path.join(
+        os.path.dirname(erpnext_repo_path), "hrms_repo"
+    )
 
-    # Collect the unique repos referenced by the module specs.
-    seen_repos: dict[str, Path] = {}   # repo_path_str -> absolute Path
-    for spec in _DEFAULT_MODULE_SPECS:
-        rp = spec["repo_path"]
-        if rp not in seen_repos:
-            seen_repos[rp] = (project_root / rp).resolve()
+    erpnext_dir = (project_root / erpnext_repo_path).resolve()
+    hrms_dir    = (project_root / hrms_repo_path).resolve()
 
-    repo_ok: set[str] = set()   # repo_path_str values that are ready
-
-    for repo_path_str, clone_dir in seen_repos.items():
-        label = Path(repo_path_str).name.replace("_repo", "")
-
-        if clone_dir.exists() and any(clone_dir.iterdir()):
-            print(f"  Repo already present: {clone_dir.name}")
-            repo_ok.add(repo_path_str)
-            continue
-
-        if dry_run:
-            # Don't attempt a clone in dry-run — report as unavailable.
-            print(f"  [DRY RUN] Repo not found: {clone_dir}")
-            print(f"            Run `python week2/ingest.py --source code` first.")
-            continue
-
-        url = _REPO_URLS.get(repo_path_str)
-        if url is None:
-            print(f"  [ERROR] No clone URL configured for {repo_path_str}")
-            continue
-
-        if _clone_repo(clone_dir, url, label):
-            repo_ok.add(repo_path_str)
-
-    # ── Step 2: resolve package roots and module directories ─────────────────
-    print()
-    package_roots: dict[str, Path] = {}   # repo_path_str -> package_root
-
-    for repo_path_str, clone_dir in seen_repos.items():
-        if repo_path_str not in repo_ok:
-            continue
-
-        # Infer package name from the first spec that uses this repo
-        pkg_name = next(
-            (Path(s["module"]).parts[0]
-             for s in _DEFAULT_MODULE_SPECS
-             if s["repo_path"] == repo_path_str),
-            None,
-        )
-        if pkg_name is None:
-            continue
-
-        root = _find_package_root(clone_dir, pkg_name)
-        package_roots[repo_path_str] = root
-        print(f"  Package root ({pkg_name}): {root}")
+    print(f"  REPO 1 (erpnext): {erpnext_dir}")
+    print(f"  REPO 2 (hrms)   : {hrms_dir}")
 
     if dry_run:
         print("  DRY RUN — no API calls will be made, nothing stored.\n")
 
-    # ── Step 3: collect qualifying functions across all target modules ────────
+    # ── Check / clone repos ──────────────────────────────────────────────────
+    for clone_dir, url, label in [
+        (erpnext_dir, _ERPNEXT_REPO_URL, "erpnext"),
+        (hrms_dir,    _HRMS_REPO_URL,    "hrms"),
+    ]:
+        if clone_dir.exists() and any(clone_dir.iterdir()):
+            print(f"  Repo already present: {clone_dir.name}")
+        elif dry_run:
+            print(f"  [DRY RUN] Repo not found: {clone_dir.name} — cannot count functions")
+        else:
+            _clone_repo(clone_dir, url, label)
+
+    print()
+
+    # ── Locate each module using explicit candidate paths ────────────────────
+    #
+    # erpnext_repo: paths are well-known, no fallback needed.
+    # hrms_repo: layout varies — try the three most common arrangements.
+    #
+    module_specs = [
+        {
+            "label":    "buying",
+            "repo_dir": erpnext_dir,
+            "candidates": ["erpnext/buying"],
+        },
+        {
+            "label":    "projects",
+            "repo_dir": erpnext_dir,
+            "candidates": ["erpnext/projects"],
+        },
+        {
+            "label":    "hr",
+            "repo_dir": hrms_dir,
+            "candidates": ["hrms/hr", "hrms/hrms/hr", "hr"],
+        },
+        {
+            "label":    "payroll",
+            "repo_dir": hrms_dir,
+            "candidates": ["hrms/payroll", "hrms/hrms/payroll", "payroll"],
+        },
+    ]
+
+    # ── Collect qualifying functions ─────────────────────────────────────────
     # Tuple layout: (fn_name, fn_source, rel_path, label, line_count)
     all_functions: list[tuple[str, str, str, str, int]] = []
 
-    for spec in _DEFAULT_MODULE_SPECS:
-        rp    = spec["repo_path"]
-        label = spec["label"]
+    for spec in module_specs:
+        repo_dir = spec["repo_dir"]
+        label    = spec["label"]
 
-        if rp not in package_roots:
-            print(f"  [SKIP] {label} — repo unavailable")
+        if not repo_dir.exists():
+            print(f"  [SKIP] {label} — repo directory not found: {repo_dir.name}")
             continue
 
-        package_root = package_roots[rp]
-        module_dir   = _find_module_dir(package_root, spec["module"])
-
+        module_dir = _locate_module(repo_dir, spec["candidates"], label)
         if module_dir is None:
-            print(
-                f"  [WARN] Module not found: {spec['module']} "
-                f"(tried primary and fallback paths) — skipping {label}"
-            )
             continue
 
-        py_files     = list(module_dir.rglob("*.py"))
         module_count = 0
-
-        for py_file in py_files:
-            rel_path = str(py_file.relative_to(package_root))
+        for py_file in module_dir.rglob("*.py"):
+            rel_path = str(py_file.relative_to(repo_dir))
             for fn_name, fn_source, fn_lines in _extract_functions(py_file):
                 all_functions.append(
                     (fn_name, fn_source, rel_path, label, fn_lines)
@@ -451,11 +385,11 @@ def run(
         print("\n  DRY RUN complete — no changes made.")
         return 0
 
-    # ── Step 4: API calls and ChromaDB storage ────────────────────────────────
-    client            = anthropic.Anthropic()
+    # ── API calls and ChromaDB storage ────────────────────────────────────────
+    client             = anthropic.Anthropic()
     total_chunks_added = 0
-    processed         = 0
-    cost_so_far       = 0.0
+    processed          = 0
+    cost_so_far        = 0.0
 
     for fn_name, fn_source, rel_path, label, line_count in all_functions[:to_process]:
 
