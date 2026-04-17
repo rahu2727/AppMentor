@@ -191,7 +191,7 @@ def run(store: ChromaStore, config_loader) -> int:
             )
             ids.append(_chunk_id(url, idx))
 
-        added = store.add(texts, metas, ids)
+        added = store.upsert(texts, metas, ids)
         total_added += added
         fetched     += 1
         print(f"  [OK] {url} — {added} chunks added")

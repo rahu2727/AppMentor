@@ -179,17 +179,22 @@ def run(store: ChromaStore, config_loader) -> int:
                     continue
 
                 module_files += 1
-                texts, metas, ids = [], [], []
+
+                # Use a dict keyed by chunk_id to deduplicate within this file.
+                # ast.walk finds nested FunctionDefs (e.g. two classes that both
+                # define a method called 'validate'), producing the same ID twice
+                # in a single batch — ChromaDB rejects that even with upsert.
+                chunks: dict[str, tuple[str, dict]] = {}
 
                 for fn_name, calls, line_count in entries:
+                    cid       = _chunk_id(rel_path, fn_name)
                     calls_str = ", ".join(calls) if calls else "(none)"
                     text = (
                         f"Function {fn_name} in {module['name']} calls: "
                         f"{calls_str}. "
                         f"Defined in {rel_path}."
                     )
-                    texts.append(text)
-                    metas.append({
+                    chunks[cid] = (text, {
                         "source":        "call_graph",
                         "chunk_type":    "call_graph",
                         "function_name": fn_name,
@@ -197,10 +202,13 @@ def run(store: ChromaStore, config_loader) -> int:
                         "calls":         calls_str,
                         "file_path":     rel_path,
                     })
-                    ids.append(_chunk_id(rel_path, fn_name))
                     module_functions += 1
 
-                added = store.add(texts=texts, metadatas=metas, ids=ids)
+                ids   = list(chunks.keys())
+                texts = [chunks[i][0] for i in ids]
+                metas = [chunks[i][1] for i in ids]
+
+                added = store.upsert(texts=texts, metadatas=metas, ids=ids)
                 module_chunks += added
 
             print(

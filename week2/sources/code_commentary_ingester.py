@@ -391,7 +391,7 @@ def run(
             f"{commentary_text_raw}"
         )
 
-        added_c = store.add(
+        added_c = store.upsert(
             texts=[commentary_text],
             metadatas=[{
                 "source":              "code_commentary",
@@ -408,7 +408,7 @@ def run(
         )
         total_chunks_added += added_c
 
-        added_r = store.add(
+        added_r = store.upsert(
             texts=[fn_source],
             metadatas=[{
                 "source":              "code_commentary",

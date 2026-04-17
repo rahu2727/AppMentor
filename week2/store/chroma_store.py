@@ -81,6 +81,15 @@ class ChromaStore:
         )
         return len(texts)
 
+    def upsert(self, texts: list[str], metadatas: list[dict], ids: list[str]) -> int:
+        """
+        Explicit upsert — identical to add() but communicates idempotent intent.
+
+        Preferred over add() in ingesters that may be re-run on existing data.
+        SAP equivalent: MODIFY instead of INSERT.
+        """
+        return self.add(texts=texts, metadatas=metadatas, ids=ids)
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

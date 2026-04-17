@@ -337,4 +337,4 @@ def run(store: ChromaStore, config_loader=None) -> int:
         )
         ids.append(a_id)
 
-    return store.add(texts=texts, metadatas=metadatas, ids=ids)
+    return store.upsert(texts=texts, metadatas=metadatas, ids=ids)
