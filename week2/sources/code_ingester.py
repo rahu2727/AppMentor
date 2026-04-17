@@ -44,6 +44,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from store.chroma_store import ChromaStore
 
+# ─────────────────────────────────────────────────────
+# NOTE: This ingester is superseded by
+# code_commentary_ingester.py which stores both
+# raw_code and commentary chunks in a single pass.
+#
+# Only use this ingester if you need raw code chunks
+# WITHOUT generating commentary — for example:
+#   - Testing ChromaDB setup before spending API credits
+#   - Ingesting a very large codebase cheaply first,
+#     then running commentary selectively on key modules
+#   - Air-gapped environments with no API access
+#
+# For normal AppMentor use: run commentary ingester only.
+# ─────────────────────────────────────────────────────
+
 _MIN_CHUNK_CHARS = 100
 _MAX_CHUNKS_FILE = 200
 
