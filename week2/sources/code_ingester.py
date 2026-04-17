@@ -1,24 +1,32 @@
 """
 week2/sources/code_ingester.py
-Clones the ERPNext GitHub repository and ingests Python source files
+
+# Configuration is externalised to week2/config/
+# To change sources, URLs or paths edit the JSON files in that folder
+# — do not hardcode values here
+
+Clones configured GitHub repositories and ingests Python source files
 and DocType JSON definitions into the ChromaStore knowledge base.
+
+Repositories, module paths, and clone settings are all read from
+sources_code.json via ConfigLoader — nothing is hardcoded here.
 
 Strategy
 --------
-1. Clone https://github.com/frappe/erpnext.git (shallow, depth=1) into
-   config["code"]["clone_dir"].  Skip the clone if the directory already
-   exists (assume it was cloned previously).
-2. Walk each module path in config["code"]["target_modules"].
-3. For *.py files: split on top-level ``def`` / ``class`` boundaries.
+1. For each enabled repository in sources_code.json:
+   a. Clone (shallow, depth=1) into the configured local_path if not present.
+   b. For each enabled module, locate the module directory using
+      path_candidates (tried in order via os.path.isdir).
+2. For *.py files: split on top-level ``def`` / ``class`` boundaries.
    Each chunk must be >= 100 characters; max 200 chunks per file.
-4. For *.json files inside a ``doctype`` directory: parse the DocType
-   schema and convert it to a human-readable text summary.
-5. Add all chunks with appropriate metadata.
+3. For *.json files inside a ``doctype`` directory: parse the DocType
+   schema and convert to a human-readable text summary.
+4. Add all chunks with appropriate metadata.
 
 Public API
 ----------
     from sources.code_ingester import run
-    chunks_added = run(store, config)
+    chunks_added = run(store, config_loader)
 """
 
 from __future__ import annotations
@@ -36,28 +44,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from store.chroma_store import ChromaStore
 
-_ERPNEXT_REPO_URL = "https://github.com/frappe/erpnext.git"
-_MIN_CHUNK_CHARS  = 100
-_MAX_CHUNKS_FILE  = 200
+_MIN_CHUNK_CHARS = 100
+_MAX_CHUNKS_FILE = 200
 
 
 # ---------------------------------------------------------------------------
-# Git clone
+# Git clone helpers
 # ---------------------------------------------------------------------------
 
 
 def _git_available() -> bool:
-    """Return True if the ``git`` command is on the PATH."""
     return shutil.which("git") is not None
 
 
-def _clone_repo(clone_dir: Path) -> bool:
-    """
-    Shallow-clone the ERPNext repo into *clone_dir*.
-
-    Returns True on success, False on any failure.
-    Prints a helpful message if git is missing or the clone fails.
-    """
+def _clone_repo(clone_dir: Path, url: str, label: str) -> bool:
+    """Shallow-clone *url* into *clone_dir*. Returns True on success."""
     if not _git_available():
         print(
             "  [ERROR] 'git' command not found.\n"
@@ -66,9 +67,8 @@ def _clone_repo(clone_dir: Path) -> bool:
         )
         return False
 
-    print(f"  Cloning ERPNext repo (shallow) into {clone_dir} …")
+    print(f"  Cloning {label} (shallow) into {clone_dir} ...")
     print("  This may take 2-5 minutes depending on your connection.")
-
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -77,30 +77,47 @@ def _clone_repo(clone_dir: Path) -> bool:
                 "git", "clone",
                 "--depth", "1",
                 "--single-branch",
-                _ERPNEXT_REPO_URL,
+                "--config", "core.protectNTFS=false",
+                url,
                 str(clone_dir),
             ],
             capture_output=True,
             text=True,
-            timeout=600,   # 10 minutes max
+            timeout=600,
         )
         if result.returncode != 0:
             print(
                 f"  [ERROR] git clone failed (exit {result.returncode}).\n"
-                f"          {result.stderr.strip()}\n"
-                f"  Check your internet connection and try again."
+                f"          {result.stderr.strip()}"
             )
             return False
-
-        print(f"  Clone complete.")
+        print(f"  Clone complete: {label}")
         return True
-
     except subprocess.TimeoutExpired:
-        print("  [ERROR] git clone timed out after 10 minutes.")
+        print(f"  [ERROR] git clone timed out ({label}).")
         return False
     except Exception as exc:
-        print(f"  [ERROR] Unexpected error during git clone: {exc}")
+        print(f"  [ERROR] {exc}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Module path resolution
+# ---------------------------------------------------------------------------
+
+
+def _locate_module(repo_dir: Path, candidates: list[str], label: str) -> Path | None:
+    """
+    Try each candidate path inside *repo_dir* using os.path.isdir().
+    Prints [OK] on match or [WARN] if nothing found.
+    """
+    for candidate in candidates:
+        full_path = repo_dir / candidate
+        if os.path.isdir(full_path):
+            print(f"  [OK] Found {label} module at: {full_path}")
+            return full_path
+    print(f"  [WARN] Could not find {label} module in {repo_dir.name} — skipping")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -112,22 +129,19 @@ def _split_by_definitions(content: str) -> list[str]:
     """
     Split Python source *content* into chunks at ``def`` / ``class`` boundaries.
 
-    Any preamble before the first definition is kept as chunk 0 if it is
-    long enough.  Each chunk must be >= _MIN_CHUNK_CHARS characters.
+    Any preamble before the first definition is kept as chunk 0 if long enough.
+    Each chunk must be >= _MIN_CHUNK_CHARS characters.
     Returns at most _MAX_CHUNKS_FILE chunks.
     """
-    # Match 'def ' or 'class ' at the start of any line (any indentation)
-    pattern = re.compile(r"^(def |class )", re.MULTILINE)
+    pattern   = re.compile(r"^(def |class )", re.MULTILINE)
     positions = [m.start() for m in pattern.finditer(content)]
 
     if not positions:
-        # No defs or classes — return the whole file as one chunk
         chunk = content.strip()
         return [chunk] if len(chunk) >= _MIN_CHUNK_CHARS else []
 
     chunks: list[str] = []
 
-    # Preamble (imports, module-level constants, docstring)
     preamble = content[: positions[0]].strip()
     if len(preamble) >= _MIN_CHUNK_CHARS:
         chunks.append(preamble)
@@ -147,11 +161,7 @@ def _split_by_definitions(content: str) -> list[str]:
 
 
 def _json_to_text(data: dict) -> str:
-    """
-    Convert an ERPNext DocType JSON schema to a human-readable text summary.
-
-    Captures: name, module, description, fields, and roles.
-    """
+    """Convert an ERPNext DocType JSON schema to a human-readable text summary."""
     lines: list[str] = []
 
     name = data.get("name", "Unknown DocType")
@@ -165,11 +175,9 @@ def _json_to_text(data: dict) -> str:
     if description:
         lines.append(f"Description: {description}")
 
-    is_submittable = data.get("is_submittable", 0)
-    if is_submittable:
+    if data.get("is_submittable", 0):
         lines.append("Submittable: Yes (has Submit/Cancel/Amend workflow)")
 
-    # Fields summary — skip layout-only field types
     _SKIP_TYPES = {"Column Break", "Section Break", "HTML", "Fold", "Heading"}
     fields = [
         f for f in data.get("fields", [])
@@ -178,11 +186,10 @@ def _json_to_text(data: dict) -> str:
     if fields:
         field_parts = [
             f"{f['label']} ({f.get('fieldtype', '?')})"
-            for f in fields[:30]   # cap at 30 for readability
+            for f in fields[:30]
         ]
         lines.append(f"Fields: {', '.join(field_parts)}")
 
-    # Roles
     permissions = data.get("permissions", [])
     roles = sorted({p.get("role", "") for p in permissions if p.get("role")})
     if roles:
@@ -192,60 +199,13 @@ def _json_to_text(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Package-root auto-detection
-# ---------------------------------------------------------------------------
-
-
-def _find_package_root(clone_dir: Path) -> Path:
-    """
-    Return the directory that directly contains the ``erpnext`` Python package.
-
-    Handles two common layouts:
-
-    * Standard direct clone::
-
-        clone_dir/
-          erpnext/
-            __init__.py
-            hr/
-
-    * Bench-style or nested checkout::
-
-        clone_dir/
-          apps/
-            erpnext/
-              erpnext/
-                __init__.py
-                hr/
-
-    Falls back to *clone_dir* unchanged if neither pattern is found, so the
-    existing "directory not found" warning still fires for genuinely missing
-    modules rather than hiding the problem silently.
-    """
-    # Pattern 1: clone_dir/erpnext/__init__.py  (most common for direct clone)
-    if (clone_dir / "erpnext" / "__init__.py").exists():
-        return clone_dir
-
-    # Pattern 2: one subdirectory level (skip hidden dirs like .git)
-    for subdir in sorted(clone_dir.iterdir()):
-        if subdir.is_dir() and not subdir.name.startswith("."):
-            if (subdir / "erpnext" / "__init__.py").exists():
-                return subdir
-
-    # Could not locate — return clone_dir so _process_module can emit the
-    # human-readable "Module directory not found" warning.
-    return clone_dir
-
-
-# ---------------------------------------------------------------------------
 # ID helpers
 # ---------------------------------------------------------------------------
 
 
 def _chunk_id(file_path: str, index: int) -> str:
     """Deterministic MD5 ID from relative file path + chunk index."""
-    key = f"{file_path}::{index}"
-    return hashlib.md5(key.encode("utf-8")).hexdigest()
+    return hashlib.md5(f"{file_path}::{index}".encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -253,28 +213,24 @@ def _chunk_id(file_path: str, index: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _process_module(
-    module_path: str,
+def _process_module_dir(
+    module_dir: Path,
+    module_name: str,
     repo_root: Path,
     store: ChromaStore,
 ) -> int:
     """
-    Walk all .py and doctype .json files in *module_path* inside *repo_root*.
+    Walk all .py and doctype .json files under *module_dir*.
 
     Returns total chunks added for this module.
     """
-    module_dir = repo_root / module_path
-    if not module_dir.exists():
-        print(f"    [WARN] Module directory not found: {module_dir}")
-        return 0
-
     py_files   = list(module_dir.rglob("*.py"))
     json_files = [
         p for p in module_dir.rglob("*.json")
-        if "doctype" in p.parts   # only DocType definitions
+        if "doctype" in p.parts
     ]
 
-    total_added = 0
+    total_added     = 0
     files_processed = 0
 
     # ── Python files ─────────────────────────────────────────────────────────
@@ -300,26 +256,25 @@ def _process_module(
                 {
                     "source":    "code",
                     "file_type": "python",
-                    "module":    module_path,
+                    "module":    module_name,
                     "file_path": rel_path,
                 }
             )
             ids.append(_chunk_id(rel_path, i))
 
         added = store.add(texts=texts, metadatas=metas, ids=ids)
-        total_added    += added
+        total_added     += added
         files_processed += 1
 
     # ── DocType JSON files ────────────────────────────────────────────────────
     for json_file in json_files:
         try:
-            data = json.loads(json_file.read_text(encoding="utf-8", errors="replace"))
+            data = json.loads(
+                json_file.read_text(encoding="utf-8", errors="replace")
+            )
         except (json.JSONDecodeError, Exception):
             continue
 
-        # Only process actual DocType definitions.
-        # json.loads() may return a list for patch files / translation arrays —
-        # those have no .get() method, so guard with isinstance first.
         if not isinstance(data, dict) or data.get("doctype") != "DocType":
             continue
 
@@ -334,17 +289,17 @@ def _process_module(
                 {
                     "source":    "code",
                     "file_type": "json_doctype",
-                    "module":    module_path,
+                    "module":    module_name,
                     "file_path": rel_path,
                 }
             ],
             ids=[_chunk_id(rel_path, 0)],
         )
-        total_added    += added
+        total_added     += added
         files_processed += 1
 
     print(
-        f"    {module_path}: {files_processed} file(s), "
+        f"    {module_name}: {files_processed} file(s), "
         f"{total_added} chunks added."
     )
     return total_added
@@ -355,49 +310,46 @@ def _process_module(
 # ---------------------------------------------------------------------------
 
 
-def run(store: ChromaStore, config: dict) -> int:
+def run(store: ChromaStore, config_loader) -> int:
     """
-    Clone (or reuse) the ERPNext repo and ingest code chunks into *store*.
+    Clone (or reuse) configured repos and ingest code chunks into *store*.
 
     Parameters
     ----------
     store : ChromaStore
         Destination knowledge base.
-    config : dict
-        The CONFIG dict from week2/config.py.
+    config_loader : ConfigLoader
+        Loaded configuration; supplies repos, module paths, and clone settings.
 
     Returns
     -------
     int
         Total chunks added.
     """
-    clone_dir_str: str  = config.get("code", {}).get("clone_dir", "./week2/data/erpnext_repo")
-    target_modules: list[str] = config.get("code", {}).get("target_modules", [])
-
-    # Resolve clone_dir relative to the project root (where ingest.py lives)
-    # so it works regardless of the caller's working directory.
     project_root = Path(__file__).parent.parent.parent   # AppMentor/
-    clone_dir    = (project_root / clone_dir_str).resolve()
+    total_added  = 0
 
-    # ── Clone if needed ───────────────────────────────────────────────────────
-    if clone_dir.exists() and any(clone_dir.iterdir()):
-        print(f"  Repo already present at {clone_dir} — skipping clone.")
-    else:
-        success = _clone_repo(clone_dir)
-        if not success:
-            return 0
+    for repo in config_loader.get_enabled_repos():
+        clone_dir = (project_root / repo["local_path"]).resolve()
+        label     = repo["name"]
 
-    # ── Auto-detect where the erpnext package lives inside the repo ──────────
-    package_root = _find_package_root(clone_dir)
-    if package_root != clone_dir:
-        print(f"  erpnext package found at sub-path: {package_root}")
-    else:
-        print(f"  erpnext package root: {package_root}")
+        # ── Clone if needed ───────────────────────────────────────────────────
+        if clone_dir.exists() and any(clone_dir.iterdir()):
+            print(f"  Repo already present: {clone_dir.name}")
+        else:
+            if not _clone_repo(clone_dir, repo["clone_url"], label):
+                continue
 
-    # ── Walk each target module ───────────────────────────────────────────────
-    total_added = 0
-    for module in target_modules:
-        print(f"  Processing module: {module}")
-        total_added += _process_module(module, package_root, store)
+        # ── Walk each enabled module ──────────────────────────────────────────
+        for module in config_loader.get_enabled_modules(label):
+            candidates = module.get("path_candidates", [module.get("path", "")])
+            module_dir = _locate_module(clone_dir, candidates, module["name"])
+            if module_dir is None:
+                continue
+
+            print(f"  Processing module: {module['name']}")
+            total_added += _process_module_dir(
+                module_dir, module["name"], clone_dir, store
+            )
 
     return total_added

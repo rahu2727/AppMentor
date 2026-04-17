@@ -1,5 +1,10 @@
 """
 week2/sources/forum_ingester.py
+
+# Configuration is externalised to week2/config/
+# To change sources, URLs or paths edit the JSON files in that folder
+# — do not hardcode values here
+
 Exactly 20 curated ERPNext Q&A pairs, stored as separate question and
 answer chunks so the knowledge base can match on either.
 
@@ -12,7 +17,7 @@ Public API
 ----------
     from sources.forum_ingester import SEED_QA, run
 
-    chunks_added = run(store)
+    chunks_added = run(store, config_loader)
 """
 
 from __future__ import annotations
@@ -263,8 +268,8 @@ SEED_QA: list[tuple[str, str, str]] = [
         "the top-right corner and select 'Export'. Choose 'Excel' as the "
         "format. Select which columns to include and click Export. The file "
         "downloads as an XLSX file. For large datasets use the Data Export "
-        "tool under Setup > Data > Export Data, which lets you export entire "
-        "DocTypes including all fields in one go.",
+        "tool under Setup > Setup > Data > Export Data, which lets you export "
+        "entire DocTypes including all fields in one go.",
         "system",
     ),
 ]
@@ -278,21 +283,29 @@ assert len(SEED_QA) == 20, f"Expected 20 SEED_QA pairs, got {len(SEED_QA)}"
 # ---------------------------------------------------------------------------
 
 
-def run(store: ChromaStore) -> int:
+def run(store: ChromaStore, config_loader=None) -> int:
     """
     Ingest all SEED_QA pairs into *store* as separate question and answer chunks.
 
-    Each Q&A pair produces two chunks:
-      - chunk_type = "question"
-      - chunk_type = "answer"
-
-    IDs are deterministic (MD5 of the text) so re-running is idempotent.
+    Parameters
+    ----------
+    store : ChromaStore
+        Destination knowledge base.
+    config_loader : ConfigLoader, optional
+        If provided, the forum source enabled flag in sources_qna.json is checked.
 
     Returns
     -------
     int
         Total number of chunks added or updated.
     """
+    if config_loader is not None:
+        sources = config_loader.qna.get("sources", [])
+        enabled = [s for s in sources if s.get("enabled", True)]
+        if not enabled:
+            print("  Forum source is disabled in sources_qna.json — skipping.")
+            return 0
+
     texts: list[str] = []
     metadatas: list[dict] = []
     ids: list[str] = []

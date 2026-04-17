@@ -1,35 +1,41 @@
 """
 week2/ingest.py — CLI entry point for building the AppMentor knowledge base.
 
+# Configuration is externalised to week2/config/
+# To change sources, URLs or paths edit the JSON files in that folder
+# — do not hardcode values here
+
 Usage
 -----
-    python week2/ingest.py                      # run all available sources
+    python week2/ingest.py                      # run forum + docs + code
     python week2/ingest.py --source forum       # forum Q&A only
-    python week2/ingest.py --source docs        # crawl docs.erpnext.com
-    python week2/ingest.py --reset              # wipe DB, then run all sources
+    python week2/ingest.py --source docs        # crawl documentation
+    python week2/ingest.py --source code        # ingest source code
+    python week2/ingest.py --source commentary  # AI function commentary
+    python week2/ingest.py --reset              # wipe DB, then run all
     python week2/ingest.py --stats              # show stats and exit
-    python week2/ingest.py --source forum --stats  # ingest then show stats
+    python week2/ingest.py --source commentary --dry-run
+    python week2/ingest.py --source commentary --max-functions 20
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import sys
 import time
 from pathlib import Path
 
-# Make week2/ importable regardless of working directory
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import CONFIG
+from config_loader import ConfigLoader
 from store.chroma_store import ChromaStore
 
 # ---------------------------------------------------------------------------
 # Source registry
 # ---------------------------------------------------------------------------
-# Maps CLI name -> dotted module path inside week2/
-# Add new sources here as the project grows.
 
 _SOURCE_REGISTRY: dict[str, str] = {
     "forum":       "sources.forum_ingester",
@@ -38,9 +44,7 @@ _SOURCE_REGISTRY: dict[str, str] = {
     "commentary":  "sources.code_commentary_ingester",
 }
 
-# Default run (python week2/ingest.py with no --source flag).
-# "commentary" is intentionally excluded from the default — it calls the
-# Claude API per function and incurs cost; run it explicitly with --source.
+# Default run excludes commentary — it calls the Claude API and incurs cost.
 _SOURCES_ALL = ["forum", "docs", "code"]
 
 
@@ -60,12 +64,14 @@ def _make_store() -> ChromaStore:
 def _ingest_source(
     source: str,
     store: ChromaStore,
+    config_loader: ConfigLoader,
     dry_run: bool = False,
     max_functions: int = 999,
 ) -> int:
     """
     Import and run one ingester. Returns chunks added (0 on skip/error).
-    dry_run and max_functions are forwarded to ingesters that support them.
+    config_loader, dry_run, and max_functions are forwarded to ingesters
+    that declare those parameters.
     """
     module_path = _SOURCE_REGISTRY.get(source)
     if module_path is None:
@@ -87,11 +93,10 @@ def _ingest_source(
 
     t0 = time.perf_counter()
     try:
-        import inspect
-        sig = inspect.signature(mod.run)
+        sig    = inspect.signature(mod.run)
         params = sig.parameters
 
-        # Build keyword args only for params the ingester actually declares.
+        # Forward optional keyword params only to ingesters that declare them.
         extra: dict = {}
         if "dry_run" in params:
             extra["dry_run"] = dry_run
@@ -99,9 +104,10 @@ def _ingest_source(
             extra["max_functions"] = max_functions
 
         if len(params) >= 2:
-            added = mod.run(store, CONFIG, **extra)
+            added = mod.run(store, config_loader, **extra)
         else:
             added = mod.run(store, **extra)
+
     except Exception as exc:
         print(f"  [ERROR] '{source}' ingester raised: {exc}")
         return 0
@@ -134,17 +140,19 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python week2/ingest.py                       # run forum + docs
-  python week2/ingest.py --source forum        # forum only
-  python week2/ingest.py --reset               # wipe then run all
-  python week2/ingest.py --stats               # show stats and exit
+  python week2/ingest.py                         # run forum + docs + code
+  python week2/ingest.py --source commentary     # AI commentary (costs ~$7)
+  python week2/ingest.py --source commentary --dry-run
+  python week2/ingest.py --source commentary --max-functions 20
+  python week2/ingest.py --reset                 # wipe then run all
+  python week2/ingest.py --stats                 # show stats and exit
 """,
     )
     p.add_argument(
         "--source",
         choices=list(_SOURCE_REGISTRY.keys()),
         default=None,
-        help="Data source to ingest. If omitted, runs forum, docs, and code.",
+        help="Data source to ingest. Omit to run forum + docs + code.",
     )
     p.add_argument(
         "--reset",
@@ -160,7 +168,7 @@ Examples:
         "--dry-run",
         action="store_true",
         dest="dry_run",
-        help="(commentary only) Scan and report without calling the API.",
+        help="(commentary) Scan and report without calling the API.",
     )
     p.add_argument(
         "--max-functions",
@@ -168,28 +176,34 @@ Examples:
         default=999,
         dest="max_functions",
         metavar="N",
-        help="(commentary only) Process at most N functions (default: 999).",
+        help="(commentary) Process at most N functions (default: 999).",
     )
     return p
 
 
 def main() -> None:
     parser = _build_parser()
-    args = parser.parse_args()
+    args   = parser.parse_args()
 
-    # Stats-only shortcut: no ingestion needed
+    config_loader = ConfigLoader()
+
+    # Stats-only shortcut
     if args.stats and not args.source and not args.reset:
+        print(config_loader.summary())
+        print()
         store = _make_store()
         _print_stats(store)
         return
 
     print("AppMentor — Week 2 Ingestion Pipeline")
     print("=" * 40)
+    print(config_loader.summary())
+    print()
 
     store = _make_store()
 
     if args.reset:
-        print("\nResetting collection...")
+        print("Resetting collection...")
         store.reset()
         print(f"  Done. Chunks remaining: {store.count()}")
 
@@ -201,6 +215,7 @@ def main() -> None:
         total_added += _ingest_source(
             source,
             store,
+            config_loader,
             dry_run=args.dry_run,
             max_functions=args.max_functions,
         )

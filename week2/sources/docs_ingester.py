@@ -1,12 +1,21 @@
 """
 week2/sources/docs_ingester.py
-Fetches ERPNext/Frappe documentation from confirmed working URLs on
-docs.frappe.io and ingests text chunks into the ChromaStore.
+
+# Configuration is externalised to week2/config/
+# To change sources, URLs or paths edit the JSON files in that folder
+# — do not hardcode values here
+
+Fetches ERPNext/Frappe documentation from URLs configured in
+sources_docs.json and ingests text chunks into the ChromaStore.
+
+URLs and crawl settings (delay, timeout, user_agent, min_text_length)
+are all read from sources_docs.json via ConfigLoader.
+Text chunking parameters (chunk_size, chunk_overlap) come from config.py.
 
 Public API
 ----------
     from sources.docs_ingester import run
-    chunks_added = run(store, config)
+    chunks_added = run(store, config_loader)
 """
 
 from __future__ import annotations
@@ -21,60 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import requests
 from bs4 import BeautifulSoup
 
+from config import CONFIG
 from store.chroma_store import ChromaStore
-
-# ---------------------------------------------------------------------------
-# Confirmed working URLs  (manually verified against docs.frappe.io)
-# ---------------------------------------------------------------------------
-
-DOCS_URLS: list[str] = [
-    # ── HR module  (/hr/ prefix) ─────────────────────────────────────────────
-    "https://docs.frappe.io/hr/expense-claim",
-    "https://docs.frappe.io/hr/leave-application",
-    "https://docs.frappe.io/hr/salary-slip",
-    "https://docs.frappe.io/hr/payroll-entry",
-    "https://docs.frappe.io/hr/employee",
-    "https://docs.frappe.io/hr/attendance",
-    "https://docs.frappe.io/hr/leave-type",
-    "https://docs.frappe.io/hr/leave-policy",
-    "https://docs.frappe.io/hr/leave-allocation",
-    "https://docs.frappe.io/hr/leave-encashment",
-    # ── Accounts  (/erpnext/ prefix) ─────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/purchase-invoice",
-    "https://docs.frappe.io/erpnext/sales-invoice",
-    "https://docs.frappe.io/erpnext/journal-entry",
-    "https://docs.frappe.io/erpnext/bank-reconciliation",
-    "https://docs.frappe.io/erpnext/payment-entry",
-    "https://docs.frappe.io/erpnext/chart-of-accounts",
-    # ── Buying ───────────────────────────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/purchase-order",
-    "https://docs.frappe.io/erpnext/material-request",
-    "https://docs.frappe.io/erpnext/supplier-quotation",
-    "https://docs.frappe.io/erpnext/request-for-quotation",
-    # ── Stock ────────────────────────────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/stock-entry",
-    "https://docs.frappe.io/erpnext/warehouse",
-    "https://docs.frappe.io/erpnext/stock-reconciliation",
-    "https://docs.frappe.io/erpnext/delivery-note",
-    "https://docs.frappe.io/erpnext/purchase-receipt",
-    # ── Projects ─────────────────────────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/project",
-    "https://docs.frappe.io/erpnext/task",
-    "https://docs.frappe.io/erpnext/timesheet",
-    # ── CRM ──────────────────────────────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/lead",
-    "https://docs.frappe.io/erpnext/opportunity",
-    # ── Setup ────────────────────────────────────────────────────────────────
-    "https://docs.frappe.io/erpnext/workflows",
-    "https://docs.frappe.io/erpnext/email-account",
-    "https://docs.frappe.io/erpnext/user-permissions",
-    "https://docs.frappe.io/erpnext/print-format",
-]
-
-_HEADERS  = {"User-Agent": "Mozilla/5.0"}
-_TIMEOUT  = 30    # seconds per request
-_DELAY    = 1.5   # seconds between requests
-_MIN_TEXT = 300   # skip pages with fewer chars of extracted text
 
 
 # ---------------------------------------------------------------------------
@@ -135,56 +92,65 @@ def _chunk_id(url: str, index: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def run(store: ChromaStore, config: dict) -> int:
+def run(store: ChromaStore, config_loader) -> int:
     """
-    Fetch every URL in DOCS_URLS, chunk the content, and add to *store*.
+    Fetch every enabled URL from sources_docs.json, chunk the content, and
+    add to *store*.
 
     Parameters
     ----------
     store : ChromaStore
         Destination knowledge base.
-    config : dict
-        The CONFIG dict from week2/config.py.
+    config_loader : ConfigLoader
+        Loaded configuration; supplies doc URLs and crawl settings.
 
     Returns
     -------
     int
         Total chunks added.
     """
-    chunk_size:    int = config.get("chunking", {}).get("chunk_size",    1200)
-    chunk_overlap: int = config.get("chunking", {}).get("chunk_overlap",  200)
+    urls          = config_loader.get_enabled_doc_urls()
+    crawl         = config_loader.get_crawl_settings()
 
-    total      = len(DOCS_URLS)
-    fetched    = 0
-    skipped    = 0
+    headers   = {"User-Agent": crawl.get("user_agent", "Mozilla/5.0")}
+    timeout   = crawl.get("timeout_seconds", 30)
+    delay     = crawl.get("delay_seconds",   1.5)
+    min_text  = crawl.get("min_text_length", 300)
+
+    chunk_size    = CONFIG.get("chunking", {}).get("chunk_size",    1200)
+    chunk_overlap = CONFIG.get("chunking", {}).get("chunk_overlap",  200)
+
+    total       = len(urls)
+    fetched     = 0
+    skipped     = 0
     total_added = 0
 
-    for i, url in enumerate(DOCS_URLS, 1):
+    for i, url in enumerate(urls, 1):
         print(f"  Fetching [{i}/{total}] {url}")
 
         # ── HTTP request ──────────────────────────────────────────────────────
         try:
-            response = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            response = requests.get(url, headers=headers, timeout=timeout)
         except requests.exceptions.ConnectionError as exc:
             print(f"  [ERROR] connection error — {exc}")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
         except requests.exceptions.Timeout:
             print(f"  [TIMEOUT] {url}")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
         except Exception as exc:
             print(f"  [ERROR] {exc}")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
 
         if response.status_code != 200:
             print(f"  [SKIP] {url} — HTTP {response.status_code}")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
 
         # ── Parse HTML ────────────────────────────────────────────────────────
@@ -194,13 +160,13 @@ def run(store: ChromaStore, config: dict) -> int:
         except Exception as exc:
             print(f"  [ERROR] parse failed — {exc}")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
 
-        if len(text) < _MIN_TEXT:
+        if len(text) < min_text:
             print(f"  [SKIP] {url} — only {len(text)} chars of text")
             skipped += 1
-            time.sleep(_DELAY)
+            time.sleep(delay)
             continue
 
         # ── Metadata ─────────────────────────────────────────────────────────
@@ -230,7 +196,7 @@ def run(store: ChromaStore, config: dict) -> int:
         fetched     += 1
         print(f"  [OK] {url} — {added} chunks added")
 
-        time.sleep(_DELAY)
+        time.sleep(delay)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(
