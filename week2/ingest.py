@@ -155,7 +155,11 @@ Examples:
         "--source",
         choices=list(_SOURCE_REGISTRY.keys()),
         default=None,
-        help="Data source to ingest. Omit to run forum + docs + code.",
+        help=(
+            "Data source to ingest. Omit to run forum + docs + code. "
+            "Raw code only — use 'commentary' instead for normal ingestion. "
+            "See code_ingester.py for when to use this."
+        ),
     )
     p.add_argument(
         "--reset",
@@ -187,6 +191,14 @@ Examples:
 def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
+
+    if args.source == "code":
+        print("[WARN] code ingester is superseded by commentary")
+        print("       Run: py week2/ingest.py --source commentary")
+        print("       Continue anyway? (y/n): ")
+        response = input()
+        if response.lower() != "y":
+            sys.exit(0)
 
     config_loader = ConfigLoader()
 
