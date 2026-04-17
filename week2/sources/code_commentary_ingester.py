@@ -5,12 +5,18 @@ week2/sources/code_commentary_ingester.py
 # To change sources, URLs or paths edit the JSON files in that folder
 # — do not hardcode values here
 
+# Prompts are managed separately in week2/prompts/
+# To update a prompt edit the relevant .yaml file
+# No changes to this file needed for prompt updates
+
 Reads Python functions from configured ERPNext/HRMS modules, generates
 plain-English commentary via the Claude API, and stores both commentary
 and raw code chunks in ChromaDB.
 
 Repositories, module paths, model name, and API settings are all read
-from sources_code.json via ConfigLoader — nothing is hardcoded here.
+from sources_code.json via ConfigLoader. Prompts are loaded from
+week2/prompts/ via PromptLoader. Language routing is handled by
+RouterAgent — nothing is hardcoded here.
 
 Public API
 ----------
@@ -34,13 +40,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import anthropic
 from dotenv import load_dotenv
 
+from prompt_loader import PromptLoader
+from sources.router_agent import RouterAgent
 from store.chroma_store import ChromaStore
 
 load_dotenv()
 
-# Cost estimate for claude-sonnet-4-6 (input $3/MTok, output $15/MTok).
+# Fallback cost estimate (input $3/MTok, output $15/MTok).
 # ~300 input tokens + ~200 output tokens per function ≈ $0.004 each.
-# This is derived from API pricing; it is not a tuneable config value.
+# Used only when actual token counts are not available.
 _COST_PER_FUNCTION: float = 0.004
 
 
@@ -183,21 +191,8 @@ def _raw_code_id(file_path: str, function_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claude API call
+# Claude API call — prompts loaded from YAML registry
 # ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = (
-    "You are a senior enterprise software developer reviewing "
-    "Python code. Write a concise plain English explanation "
-    "that a business analyst or new developer can understand. "
-    "Focus on WHAT the function does and WHY, not HOW. "
-    "Use business language throughout. Never use programming "
-    "terms like iterate, loop, return, or boolean. Replace "
-    "them with business equivalents \u2014 for example say "
-    "\"the system moves to the next stage\" not \"returns true\". "
-    "Always state whether the function runs automatically "
-    "or requires a user action."
-)
 
 
 def _generate_commentary(
@@ -206,40 +201,50 @@ def _generate_commentary(
     file_path: str,
     module_label: str,
     source_code: str,
-    model: str,
-    max_tokens: int,
-) -> str | None:
-    """Call Claude and return commentary text, or None on failure."""
-    user_message = (
-        f"Function name: {function_name}\n"
-        f"File: {file_path}\n"
-        f"Module: {module_label}\n\n"
-        f"Code:\n{source_code}\n\n"
-        "Write a commentary covering:\n"
-        "1. What this function does (one sentence)\n"
-        "2. Business purpose \u2014 what business process does it serve\n"
-        "3. Key inputs and what they represent in business terms\n"
-        "4. What it changes or what action it triggers in the system\n"
-        "5. Any important business rules or validations embedded\n"
-        "6. Edge cases or error conditions handled\n"
-        "7. Is this triggered automatically by the system or "
-        "manually by a user? What event causes it to run?\n\n"
-        "Keep the total response under 200 words.\n"
-        "Complex functions with multiple business rules may use "
-        "the full limit. Simple functions should be shorter."
+    prompt_loader: PromptLoader,
+    router_agent: RouterAgent,
+) -> tuple[str | None, str, str, str]:
+    """
+    Call Claude and return (commentary_text, prompt_name, prompt_version, expert).
+
+    Prompts are loaded from the YAML registry via PromptLoader.
+    The RouterAgent selects the correct expert prompt for the file's language.
+
+    Returns (None, prompt_name, prompt_version, expert) on API failure.
+    """
+    # ── Detect language and select expert prompt ──────────────────────────────
+    language    = router_agent.detect_language(file_path, source_code)
+    prompt_name = router_agent.LANGUAGE_RULES[language]["prompt"]
+    expert      = router_agent.get_expert_description(language)
+
+    print(f"    [{expert}] generating commentary for {function_name}")
+
+    # ── Load prompts and settings from YAML registry ──────────────────────────
+    system_prompt  = prompt_loader.get_system_prompt(prompt_name)
+    user_prompt    = prompt_loader.format_user_prompt(
+        prompt_name,
+        function_name=function_name,
+        file_path=file_path,
+        module_name=module_label,
+        function_source_code=source_code,
     )
+    settings       = prompt_loader.get_settings(prompt_name)
+    prompt_version = prompt_loader.get_version(prompt_name)
+
+    model      = settings.get("model",      "claude-sonnet-4-6")
+    max_tokens = settings.get("max_tokens", 400)
 
     try:
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        return response.content[0].text, prompt_name, prompt_version, expert
     except Exception as exc:
         print(f"    [API ERROR] {function_name}: {exc}")
-        return None
+        return None, prompt_name, prompt_version, expert
 
 
 # ---------------------------------------------------------------------------
@@ -274,20 +279,26 @@ def run(
     """
     project_root = Path(__file__).parent.parent.parent
 
-    # ── Read settings from config ─────────────────────────────────────────────
+    # ── Initialise prompt infrastructure ─────────────────────────────────────
+    prompt_loader = PromptLoader()
+    router_agent  = RouterAgent()
+
+    if not dry_run:
+        print(prompt_loader.summary())
+        print()
+
+    # ── Read agent settings from config ──────────────────────────────────────
     commentary   = config_loader.get_commentary_settings()
-    model        = commentary.get("model",              "claude-sonnet-4-6")
-    max_tokens   = commentary.get("max_tokens",         300)
-    api_delay    = commentary.get("api_delay_seconds",  0.5)
+    api_delay    = commentary.get("api_delay_seconds",          0.5)
     cost_warning = commentary.get("cost_warning_threshold_usd", 5.0)
 
-    chunking   = config_loader.get_chunking_settings()
-    min_lines  = chunking.get("min_function_lines",  5)
+    chunking  = config_loader.get_chunking_settings()
+    min_lines = chunking.get("min_function_lines", 5)
 
     if dry_run:
         print("  DRY RUN — no API calls will be made, nothing stored.\n")
 
-    # ── Check / clone repos ──────────────────────────────────────────────────
+    # ── Check / clone repos ───────────────────────────────────────────────────
     print("  Checking repositories ...")
     ready_repos: set[str] = set()
 
@@ -345,7 +356,7 @@ def run(
 
     if not dry_run:
         estimated = to_process * _COST_PER_FUNCTION
-        print(f"  Estimated cost            : ${estimated:.2f}")
+        print(f"  Estimated cost (approx)   : ${estimated:.2f}")
         if estimated >= cost_warning:
             print(
                 f"  [COST WARNING] Estimated cost ${estimated:.2f} exceeds "
@@ -364,9 +375,9 @@ def run(
 
     for fn_name, fn_source, rel_path, module_label, line_count in all_functions[:to_process]:
 
-        commentary_text_raw = _generate_commentary(
+        commentary_text_raw, prompt_name, prompt_version, expert = _generate_commentary(
             client, fn_name, rel_path, module_label,
-            fn_source, model, max_tokens,
+            fn_source, prompt_loader, router_agent,
         )
 
         if commentary_text_raw is None:
@@ -388,7 +399,9 @@ def run(
                 "function_name":       fn_name,
                 "module":              module_label,
                 "chunk_type":          "commentary",
-                "generated_by":        model,
+                "prompt_name":         prompt_name,
+                "prompt_version":      prompt_version,
+                "expert_agent":        expert,
                 "original_code_lines": line_count,
             }],
             ids=[_commentary_id(rel_path, fn_name)],
@@ -403,7 +416,9 @@ def run(
                 "function_name":       fn_name,
                 "module":              module_label,
                 "chunk_type":          "raw_code",
-                "generated_by":        model,
+                "prompt_name":         prompt_name,
+                "prompt_version":      prompt_version,
+                "expert_agent":        expert,
                 "original_code_lines": line_count,
             }],
             ids=[_raw_code_id(rel_path, fn_name)],
