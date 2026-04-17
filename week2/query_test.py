@@ -1,8 +1,8 @@
 """
 week2/query_test.py — Test runner for the AppMentor knowledge base.
 
-Runs 9 predefined queries covering all ERPNext modules and prints
-plain-text relevance labels based on cosine distance.
+Runs 12 predefined queries (9 general + 3 code-commentary) covering all
+ERPNext modules and prints plain-text relevance labels based on cosine distance.
 
 Relevance thresholds (cosine distance, lower = more similar):
     High   : distance < 0.3
@@ -53,6 +53,7 @@ def _label(distance: float) -> str:
 # ---------------------------------------------------------------------------
 
 TEST_QUERIES: list[str] = [
+    # Original 9 — general ERPNext knowledge
     "How do I submit an expense claim?",
     "What happens if my leave approver is on leave?",
     "How do I approve a purchase order?",
@@ -62,6 +63,10 @@ TEST_QUERIES: list[str] = [
     "What is the difference between invoice and delivery note?",
     "How do I reset my ERPNext password?",
     "How do I log time against a project?",
+    # Code commentary — tests AI-generated function explanations
+    "What business rules does the leave approval process follow?",
+    "What validations exist when submitting an expense claim?",
+    "What does the payroll calculation function do?",
 ]
 
 

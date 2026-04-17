@@ -32,11 +32,15 @@ from store.chroma_store import ChromaStore
 # Add new sources here as the project grows.
 
 _SOURCE_REGISTRY: dict[str, str] = {
-    "forum": "sources.forum_ingester",
-    "docs":  "sources.docs_ingester",
-    "code":  "sources.code_ingester",
+    "forum":       "sources.forum_ingester",
+    "docs":        "sources.docs_ingester",
+    "code":        "sources.code_ingester",
+    "commentary":  "sources.code_commentary_ingester",
 }
 
+# Default run (python week2/ingest.py with no --source flag).
+# "commentary" is intentionally excluded from the default — it calls the
+# Claude API per function and incurs cost; run it explicitly with --source.
 _SOURCES_ALL = ["forum", "docs", "code"]
 
 
@@ -53,16 +57,21 @@ def _make_store() -> ChromaStore:
     )
 
 
-def _ingest_source(source: str, store: ChromaStore) -> int:
+def _ingest_source(
+    source: str,
+    store: ChromaStore,
+    dry_run: bool = False,
+    max_functions: int = 999,
+) -> int:
     """
     Import and run one ingester. Returns chunks added (0 on skip/error).
+    dry_run and max_functions are forwarded to ingesters that support them.
     """
     module_path = _SOURCE_REGISTRY.get(source)
     if module_path is None:
         print(f"  [SKIP] Unknown source '{source}'.")
         return 0
 
-    # Gracefully skip sources whose module file has not been created yet
     try:
         mod = importlib.import_module(module_path)
     except ModuleNotFoundError:
@@ -78,13 +87,21 @@ def _ingest_source(source: str, store: ChromaStore) -> int:
 
     t0 = time.perf_counter()
     try:
-        # docs ingester needs config; forum ingester does not — pass it safely
         import inspect
         sig = inspect.signature(mod.run)
-        if len(sig.parameters) >= 2:
-            added = mod.run(store, CONFIG)
+        params = sig.parameters
+
+        # Build keyword args only for params the ingester actually declares.
+        extra: dict = {}
+        if "dry_run" in params:
+            extra["dry_run"] = dry_run
+        if "max_functions" in params:
+            extra["max_functions"] = max_functions
+
+        if len(params) >= 2:
+            added = mod.run(store, CONFIG, **extra)
         else:
-            added = mod.run(store)
+            added = mod.run(store, **extra)
     except Exception as exc:
         print(f"  [ERROR] '{source}' ingester raised: {exc}")
         return 0
@@ -127,7 +144,7 @@ Examples:
         "--source",
         choices=list(_SOURCE_REGISTRY.keys()),
         default=None,
-        help="Data source to ingest. If omitted, runs forum and docs.",
+        help="Data source to ingest. If omitted, runs forum, docs, and code.",
     )
     p.add_argument(
         "--reset",
@@ -138,6 +155,20 @@ Examples:
         "--stats",
         action="store_true",
         help="Print collection statistics (after any ingest/reset) and exit.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="(commentary only) Scan and report without calling the API.",
+    )
+    p.add_argument(
+        "--max-functions",
+        type=int,
+        default=999,
+        dest="max_functions",
+        metavar="N",
+        help="(commentary only) Process at most N functions (default: 999).",
     )
     return p
 
@@ -167,7 +198,12 @@ def main() -> None:
     total_added = 0
     for source in sources_to_run:
         print(f"\nIngesting source: {source}")
-        total_added += _ingest_source(source, store)
+        total_added += _ingest_source(
+            source,
+            store,
+            dry_run=args.dry_run,
+            max_functions=args.max_functions,
+        )
 
     print(f"\nIngestion complete. Total chunks added this run: {total_added}")
     print(f"Collection total: {store.count()} chunks")
