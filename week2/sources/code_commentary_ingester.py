@@ -1,16 +1,25 @@
 """
 week2/sources/code_commentary_ingester.py
-Reads Python functions from the ERPNext codebase, generates plain-English
-commentary via the Claude API, and stores both commentary and raw code in
-ChromaDB.
+Reads Python functions from ERPNext and Frappe HRMS source code, generates
+plain-English commentary via the Claude API, and stores both commentary and
+raw code in ChromaDB.
 
-Target modules (cost-controlled subset):
-  erpnext/hr, erpnext/payroll, erpnext/buying, erpnext/projects
+Repos used
+----------
+  ERPNext  — https://github.com/frappe/erpnext.git
+             -> week2/data/erpnext_repo  (buying, projects)
+  Frappe HRMS — https://github.com/frappe/hrms.git
+             -> week2/data/hrms_repo     (hr, payroll)
 
-erpnext/stock and erpnext/accounts are intentionally excluded:
-  stock contains 150+ files with complex valuation, ledger and perpetual
-  inventory logic — too expensive and noisy to annotate for a demo.
-  accounts has similar scale and depth.
+Note: HR and Payroll were split out of the ERPNext monorepo into the
+separate frappe/hrms app in ERPNext v14. They no longer exist in erpnext/hr
+or erpnext/payroll.
+
+Excluded from commentary (cost control)
+-----------------------------------------
+  erpnext/stock    — 150+ files, complex valuation & perpetual-inventory
+                     logic; too expensive and noisy for a demo run.
+  erpnext/accounts — similar scale and depth.
 
 Public API
 ----------
@@ -22,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import os
 import shutil
 import subprocess
 import sys
@@ -39,25 +47,48 @@ from store.chroma_store import ChromaStore
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Target modules — cost-controlled subset
+# Repo configurations
 # ---------------------------------------------------------------------------
 
-# erpnext/stock and erpnext/accounts are excluded (see module docstring).
-_DEFAULT_MODULES: list[str] = [
-    "erpnext/hr",
-    "erpnext/payroll",
-    "erpnext/buying",
-    "erpnext/projects",
-]
+# Maps relative repo path -> git clone URL
+_REPO_URLS: dict[str, str] = {
+    "week2/data/erpnext_repo": "https://github.com/frappe/erpnext.git",
+    "week2/data/hrms_repo":    "https://github.com/frappe/hrms.git",
+}
 
-_ERPNEXT_REPO_URL = "https://github.com/frappe/erpnext.git"
+# Each entry targets one Python package sub-module.
+#   repo_path  — relative path from project root to the cloned repo dir
+#   module     — path inside the package root to the module folder
+#   label      — human-readable name used in progress messages
+_DEFAULT_MODULE_SPECS: list[dict] = [
+    {
+        "repo_path": "week2/data/erpnext_repo",
+        "module":    "erpnext/buying",
+        "label":     "buying",
+    },
+    {
+        "repo_path": "week2/data/erpnext_repo",
+        "module":    "erpnext/projects",
+        "label":     "projects",
+    },
+    {
+        "repo_path": "week2/data/hrms_repo",
+        "module":    "hrms/hr",
+        "label":     "hr",
+    },
+    {
+        "repo_path": "week2/data/hrms_repo",
+        "module":    "hrms/payroll",
+        "label":     "payroll",
+    },
+]
 
 # Cost estimate for claude-sonnet-4-6 (input $3/MTok, output $15/MTok).
 # Average function: ~300 input tokens + ~200 output tokens ≈ $0.004 each.
 _COST_PER_FUNCTION: float = 0.004
 
-_MIN_FUNCTION_LINES: int = 5   # skip trivial one-liners and property wrappers
-_API_DELAY: float = 0.5        # seconds between API calls (rate-limit buffer)
+_MIN_FUNCTION_LINES: int = 5    # skip trivial one-liners and property wrappers
+_API_DELAY: float = 0.5         # seconds between API calls (rate-limit buffer)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +100,8 @@ def _git_available() -> bool:
     return shutil.which("git") is not None
 
 
-def _clone_repo(clone_dir: Path) -> bool:
+def _clone_repo(clone_dir: Path, url: str, label: str) -> bool:
+    """Shallow-clone *url* into *clone_dir*. Returns True on success."""
     if not _git_available():
         print(
             "  [ERROR] 'git' command not found.\n"
@@ -77,8 +109,8 @@ def _clone_repo(clone_dir: Path) -> bool:
         )
         return False
 
-    print(f"  Cloning ERPNext repo (shallow) into {clone_dir} ...")
-    print("  This may take 2-5 minutes depending on your connection.")
+    print(f"  Cloning {label} repo (shallow) into {clone_dir} ...")
+    print("  This may take 1-5 minutes depending on your connection.")
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -87,7 +119,8 @@ def _clone_repo(clone_dir: Path) -> bool:
                 "git", "clone",
                 "--depth", "1",
                 "--single-branch",
-                _ERPNEXT_REPO_URL,
+                "--config", "core.protectNTFS=false",  # Windows NTFS safety
+                url,
                 str(clone_dir),
             ],
             capture_output=True,
@@ -100,24 +133,63 @@ def _clone_repo(clone_dir: Path) -> bool:
                 f"          {result.stderr.strip()}"
             )
             return False
-        print("  Clone complete.")
+        print(f"  Clone complete: {label}")
         return True
     except subprocess.TimeoutExpired:
-        print("  [ERROR] git clone timed out after 10 minutes.")
+        print(f"  [ERROR] git clone timed out after 10 minutes ({label}).")
         return False
     except Exception as exc:
-        print(f"  [ERROR] Unexpected error during clone: {exc}")
+        print(f"  [ERROR] Unexpected error cloning {label}: {exc}")
         return False
 
 
-def _find_package_root(clone_dir: Path) -> Path:
-    if (clone_dir / "erpnext" / "__init__.py").exists():
+def _find_package_root(clone_dir: Path, package_name: str) -> Path:
+    """
+    Return the directory that directly contains *package_name*/__init__.py.
+
+    Handles two common layouts:
+      clone_dir/{package_name}/__init__.py       (standard direct clone)
+      clone_dir/{subdir}/{package_name}/__init__.py  (nested checkout)
+
+    Falls back to clone_dir unchanged so callers get a clear "not found"
+    warning rather than a silent wrong path.
+    """
+    if (clone_dir / package_name / "__init__.py").exists():
         return clone_dir
+
     for subdir in sorted(clone_dir.iterdir()):
         if subdir.is_dir() and not subdir.name.startswith("."):
-            if (subdir / "erpnext" / "__init__.py").exists():
+            if (subdir / package_name / "__init__.py").exists():
                 return subdir
+
     return clone_dir
+
+
+def _find_module_dir(package_root: Path, module_path: str) -> Path | None:
+    """
+    Resolve *module_path* relative to *package_root*, trying two layouts:
+
+    Primary  : package_root / module_path          (e.g. .../hrms/hr)
+    Fallback : package_root / parts[0] / module    (e.g. .../hrms/hrms/hr)
+
+    The fallback handles repos where the package sits one directory deeper
+    than _find_package_root detected (e.g. hrms/hrms/ inside an hrms/ repo).
+
+    Returns the resolved Path or None if neither location exists.
+    """
+    primary = package_root / module_path
+    if primary.exists():
+        return primary
+
+    # Fallback: insert the top-level package name as an extra directory
+    parts = Path(module_path).parts          # ('hrms', 'hr')
+    if len(parts) >= 2:
+        alt = package_root / parts[0] / module_path   # hrms/hrms/hr
+        if alt.exists():
+            print(f"  [INFO] Using alternative path: {alt}")
+            return alt
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +199,13 @@ def _find_package_root(clone_dir: Path) -> Path:
 
 def _extract_functions(file_path: Path) -> list[tuple[str, str, int]]:
     """
-    Parse one Python file and return (name, source_code, line_count) tuples
-    for every qualifying FunctionDef node.
+    Parse one .py file; return (name, source_code, line_count) for every
+    qualifying FunctionDef.
 
     Excluded:
-    - Functions under _MIN_FUNCTION_LINES lines (too trivial)
-    - Dunder methods  (__init__, __str__, etc.)
-    - Test functions  (test_*)
+    - Fewer than _MIN_FUNCTION_LINES lines  (too trivial)
+    - Dunder methods  __name__              (infrastructure, not business logic)
+    - Names starting with test_             (test helpers)
     """
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -152,7 +224,6 @@ def _extract_functions(file_path: Path) -> list[tuple[str, str, int]]:
             continue
 
         name = node.name
-
         if name.startswith("__") and name.endswith("__"):
             continue
         if name.startswith("test_"):
@@ -164,7 +235,6 @@ def _extract_functions(file_path: Path) -> list[tuple[str, str, int]]:
 
         source = ast.get_source_segment(content, node)
         if source is None:
-            # Fallback for older Python builds
             lines = content.splitlines()
             source = "\n".join(lines[node.lineno - 1 : node.end_lineno])
 
@@ -210,14 +280,14 @@ def _generate_commentary(
     client: anthropic.Anthropic,
     function_name: str,
     file_path: str,
-    module_name: str,
+    module_label: str,
     source_code: str,
 ) -> str | None:
-    """Call Claude and return the commentary text, or None on failure."""
+    """Call Claude and return commentary text, or None on failure."""
     user_message = (
         f"Function name: {function_name}\n"
         f"File: {file_path}\n"
-        f"Module: {module_name}\n\n"
+        f"Module: {module_label}\n\n"
         f"Code:\n{source_code}\n\n"
         "Write a commentary covering:\n"
         "1. What this function does (one sentence)\n"
@@ -254,7 +324,7 @@ def run(
     max_functions: int = 999,
 ) -> int:
     """
-    Generate AI commentary for Python functions in the ERPNext codebase.
+    Generate AI commentary for Python functions from ERPNext + HRMS.
 
     Parameters
     ----------
@@ -265,70 +335,111 @@ def run(
     dry_run : bool
         If True, scan and report without calling the API or storing anything.
     max_functions : int
-        Cap on functions to process (default 999). Set to 50 for testing.
+        Cap on functions to process (default 999). Set to 20 for a test run.
 
     Returns
     -------
     int
         Total chunks added (0 in dry_run mode).
     """
-    clone_dir_str: str = config.get("code", {}).get(
-        "clone_dir", "./week2/data/erpnext_repo"
-    )
-    target_modules: list[str] = config.get("code_commentary", {}).get(
-        "target_modules", _DEFAULT_MODULES
-    )
-
     project_root = Path(__file__).parent.parent.parent
-    clone_dir = (project_root / clone_dir_str).resolve()
 
-    # ── Ensure repo is available ─────────────────────────────────────────────
-    if not clone_dir.exists() or not any(clone_dir.iterdir()):
-        print(f"  ERPNext repo not found at {clone_dir}")
+    # ── Step 1: ensure all repos are cloned ──────────────────────────────────
+    print("  Checking repositories ...")
+
+    # Collect the unique repos referenced by the module specs.
+    seen_repos: dict[str, Path] = {}   # repo_path_str -> absolute Path
+    for spec in _DEFAULT_MODULE_SPECS:
+        rp = spec["repo_path"]
+        if rp not in seen_repos:
+            seen_repos[rp] = (project_root / rp).resolve()
+
+    repo_ok: set[str] = set()   # repo_path_str values that are ready
+
+    for repo_path_str, clone_dir in seen_repos.items():
+        label = Path(repo_path_str).name.replace("_repo", "")
+
+        if clone_dir.exists() and any(clone_dir.iterdir()):
+            print(f"  Repo already present: {clone_dir.name}")
+            repo_ok.add(repo_path_str)
+            continue
+
         if dry_run:
-            print(
-                "  DRY RUN — would target modules:\n"
-                + "\n".join(f"    {m}" for m in target_modules)
-            )
-            print("  Cannot count functions without the repo. Run:")
-            print("    python week2/ingest.py --source code")
-            return 0
-        success = _clone_repo(clone_dir)
-        if not success:
-            print("  Hint: run `python week2/ingest.py --source code` first.")
-            return 0
+            # Don't attempt a clone in dry-run — report as unavailable.
+            print(f"  [DRY RUN] Repo not found: {clone_dir}")
+            print(f"            Run `python week2/ingest.py --source code` first.")
+            continue
 
-    package_root = _find_package_root(clone_dir)
-    print(f"  Using repo at: {package_root}")
+        url = _REPO_URLS.get(repo_path_str)
+        if url is None:
+            print(f"  [ERROR] No clone URL configured for {repo_path_str}")
+            continue
+
+        if _clone_repo(clone_dir, url, label):
+            repo_ok.add(repo_path_str)
+
+    # ── Step 2: resolve package roots and module directories ─────────────────
+    print()
+    package_roots: dict[str, Path] = {}   # repo_path_str -> package_root
+
+    for repo_path_str, clone_dir in seen_repos.items():
+        if repo_path_str not in repo_ok:
+            continue
+
+        # Infer package name from the first spec that uses this repo
+        pkg_name = next(
+            (Path(s["module"]).parts[0]
+             for s in _DEFAULT_MODULE_SPECS
+             if s["repo_path"] == repo_path_str),
+            None,
+        )
+        if pkg_name is None:
+            continue
+
+        root = _find_package_root(clone_dir, pkg_name)
+        package_roots[repo_path_str] = root
+        print(f"  Package root ({pkg_name}): {root}")
 
     if dry_run:
         print("  DRY RUN — no API calls will be made, nothing stored.\n")
 
-    # ── Collect qualifying functions across all target modules ────────────────
-    # List of (function_name, source_code, rel_file_path, module_name, line_count)
+    # ── Step 3: collect qualifying functions across all target modules ────────
+    # Tuple layout: (fn_name, fn_source, rel_path, label, line_count)
     all_functions: list[tuple[str, str, str, str, int]] = []
 
-    for module_name in target_modules:
-        module_dir = package_root / module_name
-        if not module_dir.exists():
-            print(f"  [WARN] Module not found: {module_dir} — skipping")
+    for spec in _DEFAULT_MODULE_SPECS:
+        rp    = spec["repo_path"]
+        label = spec["label"]
+
+        if rp not in package_roots:
+            print(f"  [SKIP] {label} — repo unavailable")
             continue
 
-        py_files = list(module_dir.rglob("*.py"))
+        package_root = package_roots[rp]
+        module_dir   = _find_module_dir(package_root, spec["module"])
+
+        if module_dir is None:
+            print(
+                f"  [WARN] Module not found: {spec['module']} "
+                f"(tried primary and fallback paths) — skipping {label}"
+            )
+            continue
+
+        py_files     = list(module_dir.rglob("*.py"))
         module_count = 0
 
         for py_file in py_files:
             rel_path = str(py_file.relative_to(package_root))
             for fn_name, fn_source, fn_lines in _extract_functions(py_file):
                 all_functions.append(
-                    (fn_name, fn_source, rel_path, module_name, fn_lines)
+                    (fn_name, fn_source, rel_path, label, fn_lines)
                 )
                 module_count += 1
 
-        print(f"  {module_name}: {module_count} qualifying functions found")
+        print(f"  {label}: {module_count} qualifying functions found")
 
     total_found = len(all_functions)
-    to_process = min(total_found, max_functions)
+    to_process  = min(total_found, max_functions)
 
     print(f"\n  Total qualifying functions : {total_found}")
     print(f"  Will process              : {to_process}  (max_functions={max_functions})")
@@ -340,36 +451,36 @@ def run(
         print("\n  DRY RUN complete — no changes made.")
         return 0
 
-    # ── API calls and ChromaDB storage ───────────────────────────────────────
-    client = anthropic.Anthropic()
+    # ── Step 4: API calls and ChromaDB storage ────────────────────────────────
+    client            = anthropic.Anthropic()
     total_chunks_added = 0
-    processed = 0
-    cost_so_far = 0.0
+    processed         = 0
+    cost_so_far       = 0.0
 
-    for fn_name, fn_source, rel_path, module_name, line_count in all_functions[:to_process]:
+    for fn_name, fn_source, rel_path, label, line_count in all_functions[:to_process]:
 
         commentary = _generate_commentary(
-            client, fn_name, rel_path, module_name, fn_source
+            client, fn_name, rel_path, label, fn_source
         )
 
         if commentary is None:
             time.sleep(_API_DELAY)
             continue
 
-        # ── Commentary chunk ──────────────────────────────────────────────────
         commentary_text = (
             f"Function: {fn_name}\n"
             f"File: {rel_path}\n"
-            f"Module: {module_name}\n\n"
+            f"Module: {label}\n\n"
             f"{commentary}"
         )
+
         added_c = store.add(
             texts=[commentary_text],
             metadatas=[{
                 "source":              "code_commentary",
                 "file_path":           rel_path,
                 "function_name":       fn_name,
-                "module":              module_name,
+                "module":              label,
                 "chunk_type":          "commentary",
                 "generated_by":        "claude-sonnet-4-6",
                 "original_code_lines": line_count,
@@ -378,14 +489,13 @@ def run(
         )
         total_chunks_added += added_c
 
-        # ── Raw code chunk ────────────────────────────────────────────────────
         added_r = store.add(
             texts=[fn_source],
             metadatas=[{
                 "source":              "code_commentary",
                 "file_path":           rel_path,
                 "function_name":       fn_name,
-                "module":              module_name,
+                "module":              label,
                 "chunk_type":          "raw_code",
                 "generated_by":        "claude-sonnet-4-6",
                 "original_code_lines": line_count,
@@ -394,8 +504,8 @@ def run(
         )
         total_chunks_added += added_r
 
-        processed += 1
-        cost_so_far = processed * _COST_PER_FUNCTION
+        processed   += 1
+        cost_so_far  = processed * _COST_PER_FUNCTION
 
         if processed % 10 == 0:
             print(
@@ -406,7 +516,7 @@ def run(
         time.sleep(_API_DELAY)
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\n  Commentary complete:")
+    print("\n  Commentary complete:")
     print(f"    Functions processed : {processed}")
     print(f"    Chunks added        : {total_chunks_added}")
     print(f"    Estimated cost      : ${cost_so_far:.2f}")
