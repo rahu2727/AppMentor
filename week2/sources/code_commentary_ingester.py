@@ -337,7 +337,8 @@ def run(
 
             module_count = 0
             for py_file in module_dir.rglob("*.py"):
-                rel_path = str(py_file.relative_to(clone_dir))
+                # Normalise to forward slashes so IDs are identical on Windows and Linux
+                rel_path = str(py_file.relative_to(clone_dir)).replace("\\", "/")
                 for fn_name, fn_source, fn_lines in _extract_functions(
                     py_file, min_lines=min_lines
                 ):
@@ -351,11 +352,21 @@ def run(
     total_found = len(all_functions)
 
     # ── Check which functions are already in ChromaDB ─────────────────────────
-    all_ids      = [_commentary_id(f[2], f[0]) for f in all_functions]
+    # Generate IDs for both forward-slash and backslash paths so chunks
+    # ingested on Windows (backslash IDs) are recognised as already-done.
+    all_ids_fwd  = [_commentary_id(f[2],                    f[0]) for f in all_functions]
+    all_ids_back = [_commentary_id(f[2].replace("/", "\\"), f[0]) for f in all_functions]
+    all_ids_both = list(set(all_ids_fwd + all_ids_back))
     already_done = 0
     try:
-        existing = store._collection.get(ids=all_ids, include=[])
+        existing = store._collection.get(ids=all_ids_both, include=[])
+        # Divide by 2 because each function contributes two candidate IDs
         already_done = len(existing["ids"]) if existing and existing["ids"] else 0
+        # De-duplicate: a hit on EITHER variant counts as one function done
+        fwd_set  = set(all_ids_fwd)
+        back_set = set(all_ids_back)
+        hit_set  = set(existing["ids"])
+        already_done = len((hit_set & fwd_set) | (hit_set & back_set))
     except Exception:
         already_done = 0
 
@@ -391,10 +402,12 @@ def run(
         if processed >= to_process:
             break
 
-        # Skip functions already in ChromaDB — avoids redundant API calls
-        existing_id = _commentary_id(rel_path, fn_name)
+        # Skip functions already in ChromaDB — check both slash variants so
+        # chunks ingested on Windows (backslash IDs) are correctly skipped.
+        existing_id      = _commentary_id(rel_path,                    fn_name)
+        existing_id_back = _commentary_id(rel_path.replace("/", "\\"), fn_name)
         try:
-            existing = store._collection.get(ids=[existing_id], include=[])
+            existing = store._collection.get(ids=[existing_id, existing_id_back], include=[])
             if existing and len(existing["ids"]) > 0:
                 skip_count += 1
                 continue
