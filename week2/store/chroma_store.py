@@ -78,28 +78,53 @@ class ChromaStore:
         self,
         query_text: str,
         n_results: int = DEFAULT_N_RESULTS,
+        where: dict | None = None,
     ) -> list[dict[str, Any]]:
         """
         Semantic search against the collection.
+
+        Args:
+            query_text: The natural-language query to embed and search.
+            n_results:  Maximum number of results to return.
+            where:      Optional ChromaDB metadata filter dict, e.g.
+                        {"source": {"$eq": "forum"}} or
+                        {"chunk_type": {"$eq": "commentary"}}.
+                        Falls back to unfiltered search if the clause
+                        matches nothing or raises an error.
 
         Returns a list of dicts, each containing:
             text      — the stored document string
             metadata  — the stored metadata dict
             distance  — cosine distance (0 = identical, 2 = opposite)
         """
-        raw = self._collection.query(
+        count = self._collection.count()
+        if count == 0:
+            return []
+
+        kwargs: dict[str, Any] = dict(
             query_texts=[query_text],
-            n_results=min(n_results, self._collection.count() or 1),
+            n_results=min(n_results, count),
             include=["documents", "metadatas", "distances"],
         )
+        if where:
+            kwargs["where"] = where
+
+        try:
+            raw = self._collection.query(**kwargs)
+        except Exception:
+            # where clause references a field absent from all docs — fall back
+            kwargs.pop("where", None)
+            raw = self._collection.query(**kwargs)
 
         results = []
-        docs = raw["documents"][0]
-        metas = raw["metadatas"][0]
-        dists = raw["distances"][0]
-
-        for doc, meta, dist in zip(docs, metas, dists):
+        for doc, meta, dist in zip(
+            raw["documents"][0], raw["metadatas"][0], raw["distances"][0]
+        ):
             results.append({"text": doc, "metadata": meta, "distance": dist})
+
+        # If filtered query returned nothing, retry without filter
+        if where and not results:
+            return self.query(query_text, n_results)
 
         return results
 
