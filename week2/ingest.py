@@ -15,10 +15,10 @@ import importlib
 import sys
 from pathlib import Path
 
-# Ensure week2/ is importable regardless of cwd
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root so week2.* imports are always unambiguous
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from store.chroma_store import ChromaStore
+from week2.store.chroma_store import ChromaStore
 
 
 # ---------------------------------------------------------------------------
@@ -26,9 +26,9 @@ from store.chroma_store import ChromaStore
 # ---------------------------------------------------------------------------
 
 SOURCE_REGISTRY: dict[str, str] = {
-    "forum": "sources.forum_ingester",
-    "docs": "sources.docs_ingester",    # stub — file doesn't exist yet
-    "code": "sources.code_ingester",    # stub — file doesn't exist yet
+    "forum": "week2.sources.forum_ingester",
+    "docs": "week2.sources.docs_ingester",    # stub — file doesn't exist yet
+    "code": "week2.sources.code_ingester",    # stub — file doesn't exist yet
 }
 
 

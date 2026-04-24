@@ -21,8 +21,9 @@ from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunct
 # ---------------------------------------------------------------------------
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import CHROMA_DIR, COLLECTION_NAME, DEFAULT_N_RESULTS, EMBEDDING_MODEL
+# Insert project root so imports always resolve to week2.config unambiguously
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from week2.config import CHROMA_DIR, COLLECTION_NAME, DEFAULT_N_RESULTS, EMBEDDING_MODEL
 
 
 class ChromaStore:

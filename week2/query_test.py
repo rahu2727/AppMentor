@@ -19,11 +19,11 @@ import argparse
 import sys
 from pathlib import Path
 
-# Ensure week2/ is importable regardless of cwd
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root so week2.* imports are always unambiguous
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import GREEN_THRESHOLD, YELLOW_THRESHOLD
-from store.chroma_store import ChromaStore
+from week2.config import GREEN_THRESHOLD, YELLOW_THRESHOLD
+from week2.store.chroma_store import ChromaStore
 
 # ---------------------------------------------------------------------------
 # ANSI colour helpers (works in most terminals; degrades gracefully on Windows)
