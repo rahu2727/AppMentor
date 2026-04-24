@@ -21,9 +21,24 @@ from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunct
 # ---------------------------------------------------------------------------
 import sys
 
-# Insert project root so imports always resolve to week2.config unambiguously
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from week2.config import CHROMA_DIR, COLLECTION_NAME, DEFAULT_N_RESULTS, EMBEDDING_MODEL
+# Inline defaults — no dependency on config.py, works from any cwd
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+CHROMA_DIR = _PROJECT_ROOT / "chroma_db"
+COLLECTION_NAME = "appmentor_kb"
+DEFAULT_N_RESULTS = 5
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+# Override with values from week2/config.py if available
+try:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+    from week2.config import (  # noqa: F811
+        CHROMA_DIR,
+        COLLECTION_NAME,
+        DEFAULT_N_RESULTS,
+        EMBEDDING_MODEL,
+    )
+except (ImportError, Exception):
+    pass  # keep inline defaults above
 
 
 class ChromaStore:
